@@ -2,6 +2,7 @@ param()
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'This installer/build script is restricted to ephemeral GitHub-hosted Windows; never run locally' }
+. "$PSScriptRoot/rtc-ci-storage.ps1"
 $repository=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $pins=Get-Content -Raw -LiteralPath (Join-Path $repository 'src/rtcbridge-native/pins.json') | ConvertFrom-Json
 if (Test-Path -LiteralPath (Join-Path $repository 'export-manifest.json')) {
@@ -19,21 +20,32 @@ function Download-Pinned([string]$Uri,[string]$Path,[string]$Sha) {
 function Disk-Snapshot { Get-PSDrive -PSProvider FileSystem | Select-Object Name,Free,Used }
 $before=@(Disk-Snapshot)
 $before | Format-Table | Out-Host
-# Fixed allowlist: these are unrelated preinstalled toolchains/caches on this
-# disposable VM. Preserve Visual Studio, Windows SDKs, Git, Node and gh.
+# Prefer the measured D: workspace before considering any deletion. A runner
+# with enough space on either D or C needs no preinstalled-cache cleanup.
+$minimumFree=[long]($pins.minimum_free_gib * 1GB)
+$volume=Select-RtcCiBuildVolume $before $minimumFree
+$cleanupSkipped=$null -ne $volume
 $reclaimed=@()
-foreach($path in @('C:\hostedtoolcache','C:\Android','C:\Program Files\Android','C:\Program Files\Java','C:\Program Files\Unity','C:\Program Files\Unity Hub','C:\SeleniumWebDrivers','C:\vcpkg')) {
-    if (!(Test-Path -LiteralPath $path)) { continue }
-    $resolved=(Get-Item -LiteralPath $path -Force).FullName
-    if ($resolved -ine $path -or ($resolved -notlike 'C:\*') -or $resolved.Length -lt 10 -or $resolved -like '*Visual Studio*' -or $resolved -like '*Windows Kits*') { throw 'Unsafe ephemeral cleanup target' }
-    if (((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Refusing ephemeral cleanup through a reparse point' }
-    Remove-Item -LiteralPath $resolved -Recurse -Force
-    $reclaimed += $resolved
+if ($cleanupSkipped) {
+    Write-Host "Skipping all cache cleanup: $($volume.Name): already has $([Math]::Round($volume.Free/1GB,2)) GiB free (requires $($pins.minimum_free_gib) GiB)"
+} else {
+    # Only this fixed allowlist can be removed, and only on the hosted VM.
+    foreach($path in Get-RtcCiCleanupTargets) {
+        if (!(Test-Path -LiteralPath $path)) { continue }
+        $item=Get-Item -LiteralPath $path -Force
+        $resolved=$item.FullName
+        Assert-RtcCiCleanupTarget $path $resolved $item.Attributes
+        Write-Host "Reclaiming verified ephemeral cache: $resolved"
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+        $reclaimed += $resolved
+        $volume=Select-RtcCiBuildVolume @(Disk-Snapshot) $minimumFree
+        if ($null -ne $volume) { break }
+    }
 }
 $after=@(Disk-Snapshot)
 $after | Format-Table | Out-Host
-$volume=Get-PSDrive -PSProvider FileSystem | Where-Object {$_.Name -in @('C','D')} | Sort-Object Free -Descending | Select-Object -First 1
-if ($volume.Free -lt ($pins.minimum_free_gib * 1GB)) { throw "Insufficient hosted runner disk after bounded cache reclamation: need $($pins.minimum_free_gib) GiB; a larger ephemeral hosted runner is required" }
+$volume=Select-RtcCiBuildVolume $after $minimumFree
+if ($null -eq $volume) { throw "Insufficient hosted runner disk after bounded cache reclamation: need $($pins.minimum_free_gib) GiB; a larger ephemeral hosted runner is required" }
 $buildRoot="$($volume.Name):\gb-rtc-ci"
 if (Test-Path -LiteralPath $buildRoot) { throw 'CI source directory unexpectedly exists' }
 New-Item -ItemType Directory -Path $buildRoot | Out-Null
@@ -143,6 +155,7 @@ $metadata=@{
     runner_image=$env:ImageOS;runner_image_version=$env:ImageVersion
     visual_studio_path=$vs;sdk_installer_sha256=$pins.windows_sdk_installer_sha256
     disk_before=$before;disk_after=$after;reclaimed_paths=$reclaimed
+    build_volume=$volume.Name;cleanup_skipped=$cleanupSkipped
     core_tests='passed';injector_cold_start='passed';abi_production='passed';abi_probe='passed';short_gate='passed'
 }
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payload 'native-build.json') -Encoding UTF8

@@ -44,8 +44,12 @@ Build and artifact flow:
 3. Dispatch `.github/workflows/build-libwebrtc.yml`. The script refuses to run
    locally. The `windows-2025-vs2026` hosted image supplies VS2026 C++/ATL/MFC;
    the pinned Microsoft-signed SDK installer adds 10.0.28000.2270 and debugger
-   tools. Fixed ephemeral cache/toolchain directories may be reclaimed, with
-   before/after disk measurements. Sync fails unless 60 GiB remains available.
+   tools. Before cleanup, measured free space selects D: preferentially and
+   skips all deletion if D: or C: already meets 60 GiB. Only if neither fits,
+   fixed, exact-identity, non-reparse cache directories may be reclaimed until
+   a disk reaches the threshold. VS/Windows Kits are never cleanup targets.
+   Before/after measurements and skipped cleanup are recorded; sync still
+   fails unless at least 60 GiB remains after SDK provisioning.
 4. Pinned depot_tools, libwebrtc and DEPS plus the hash-checked startup patch
    build the three DLL variants plus
    the actual shared ABI/native benchmark consumers. The workflow runs core,

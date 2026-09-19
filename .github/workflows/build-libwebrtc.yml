@@ -24,6 +24,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Validate read-only hosted storage policy
+        run: ./src/rtcbridge-native/tests/ci_storage_tests.ps1
       - name: Build and test only on ephemeral hosted Windows
         run: ./scripts/build-libwebrtc-ci.ps1
       - name: Attest the exact archive after ABI and five-second gate pass
