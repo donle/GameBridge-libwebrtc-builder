@@ -3,6 +3,7 @@ $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'This installer/build script is restricted to ephemeral GitHub-hosted Windows; never run locally' }
 . "$PSScriptRoot/rtc-ci-storage.ps1"
+. "$PSScriptRoot/rtc-ci-git.ps1"
 $repository=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $pins=Get-Content -Raw -LiteralPath (Join-Path $repository 'src/rtcbridge-native/pins.json') | ConvertFrom-Json
 if (Test-Path -LiteralPath (Join-Path $repository 'export-manifest.json')) {
@@ -66,21 +67,41 @@ foreach($file in @("Include\$($pins.windows_sdk_directory_version)\um\Windows.h"
     if (!(Test-Path -LiteralPath (Join-Path $sdkRoot $file))) { throw 'Pinned Windows SDK/debugging tools were not installed' }
 }
 $depot=Join-Path $buildRoot 'depot_tools'
-git -c core.longpaths=true clone --filter=blob:none --no-checkout https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
+# Resolve native Git before depot_tools can add generated wrappers to PATH.
+$gitExe=Resolve-RtcCiGitExecutable @(Get-Command git.exe -CommandType Application -All -ErrorAction Stop)
+$gitDirectory=[IO.Path]::GetDirectoryName($gitExe)
+$gitVersion=(& $gitExe --version).Trim()
+Check-Exit 'Native Git executable'
+Write-Host "Native Git binding: $gitExe ($gitVersion)"
+& $gitExe -c core.longpaths=true clone --filter=blob:none --no-checkout https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
 Check-Exit 'depot_tools clone'
-git -C $depot checkout --detach $pins.depot_tools_revision
+& $gitExe -C $depot checkout --detach $pins.depot_tools_revision
 Check-Exit 'depot_tools pinned checkout'
 $env:DEPOT_TOOLS_UPDATE='0';$env:DEPOT_TOOLS_WIN_TOOLCHAIN='0'
+$env:DEPOT_TOOLS_METRICS='0'
 $env:VPYTHON_VIRTUALENV_ROOT=Join-Path $buildRoot 'vpython';$env:CIPD_CACHE_DIR=Join-Path $buildRoot 'cipd-cache'
-$env:Path="$depot;$env:Path"
+$env:Path="$depot;$gitDirectory;$env:Path"
+# DEPOT_TOOLS_UPDATE=0 also skips first-run wrapper generation in gclient.bat.
+# Run the pinned official bootstrap directly: it discovers the explicitly
+# selected Git directory and generates git.bat containing the absolute exe.
+# Do not enable auto-update or monkey-patch Mirror.git_exe to work around this.
+cmd /d /c "$depot\bootstrap\win_tools.bat"
+Check-Exit 'Pinned Windows depot_tools bootstrap'
+$depotAfterBootstrap=(& $gitExe -C $depot rev-parse HEAD).Trim()
+Check-Exit 'Post-bootstrap depot_tools revision'
+if ($depotAfterBootstrap -cne $pins.depot_tools_revision) { throw 'Bootstrap changed the pinned depot_tools revision' }
+& "$depot/vpython3.bat" -B "$repository/src/rtcbridge-native/tests/depot_git_tests.py" $depot $gitExe
+Check-Exit 'Actual pinned Git wrapper/cache lookup preflight'
 if ((Get-PSDrive -Name $volume.Name).Free -lt ($pins.minimum_free_gib * 1GB)) { throw 'SDK provisioning left insufficient disk for pinned libwebrtc sync/build' }
 $sourceRoot=Join-Path $buildRoot 'webrtc'
 New-Item -ItemType Directory -Path $sourceRoot | Out-Null
 Push-Location $sourceRoot
 try {
-    # Bootstrap Windows depot_tools through cmd, per upstream instructions.
-    cmd /c gclient --version
-    Check-Exit 'depot_tools bootstrap'
+    # Use an actual gclient command: --version printed generic help and exited
+    # successfully on this pin, which did not establish bootstrap readiness.
+    $gclientRoot=(cmd /d /c gclient root | Out-String).Trim()
+    Check-Exit 'gclient root command'
+    if ([IO.Path]::GetFullPath($gclientRoot) -ine $sourceRoot) { throw 'gclient root smoke test resolved an unexpected workspace' }
     $spec="solutions = [{'name':'src','url':'https://webrtc.googlesource.com/src.git','managed':False,'custom_deps':{},'custom_vars':{'checkout_android':False,'checkout_ios':False}}]"
     [IO.File]::WriteAllText((Join-Path $sourceRoot '.gclient'),$spec,[Text.UTF8Encoding]::new($false))
     git -c core.longpaths=true clone --filter=blob:none --no-checkout --depth 1 https://webrtc.googlesource.com/src.git src
@@ -156,6 +177,7 @@ $metadata=@{
     visual_studio_path=$vs;sdk_installer_sha256=$pins.windows_sdk_installer_sha256
     disk_before=$before;disk_after=$after;reclaimed_paths=$reclaimed
     build_volume=$volume.Name;cleanup_skipped=$cleanupSkipped
+    git_executable=$gitExe;git_version=$gitVersion;depot_bootstrap_revision=$depotAfterBootstrap
     core_tests='passed';injector_cold_start='passed';abi_production='passed';abi_probe='passed';short_gate='passed'
 }
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payload 'native-build.json') -Encoding UTF8

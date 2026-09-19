@@ -51,8 +51,15 @@ Build and artifact flow:
    Before/after measurements and skipped cleanup are recorded; sync still
    fails unless at least 60 GiB remains after SDK provisioning.
 4. Pinned depot_tools, libwebrtc and DEPS plus the hash-checked startup patch
-   build the three DLL variants plus
-   the actual shared ABI/native benchmark consumers. The workflow runs core,
+   build the three DLL variants plus the actual shared ABI/native benchmark
+   consumers. Depot auto-update remains disabled; its pinned official Windows
+   bootstrap is called explicitly to generate the required Git wrappers. PATH
+   keeps depot_tools first and the selected native Git directory second. Ordered
+   application matches are reduced to the first valid Git installation's
+   canonical `cmd/git.exe`, including when its `bin/git.exe` matched first. A real
+   `Mirror.GetCachePath` subprocess preflight verifies the wrapper and exact
+   `git.exe` binding before sync; `gclient root` verifies command readiness.
+   The workflow runs core,
    production and probe ABI tests, then the real five-second media gate. Only
    success produces the SHA-256 archive and GitHub provenance attestation.
    The cold-start regression compiles the actual pinned injector method bodies
