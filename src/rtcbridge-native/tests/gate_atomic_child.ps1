@@ -1,8 +1,20 @@
-param([string]$Writer,[string]$Output,[string]$ReadyEvent,[ValidateSet('BeforeFlush','BeforeReplace')][string]$Phase)
+param([string]$Writer,[string]$Output,[string]$ReadyEvent,[ValidateSet('BeforeFlush','BeforeReplace','HoldLock')][string]$Phase,[string]$ReleaseStartEvent)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 . $Writer
 $ready=[Threading.EventWaitHandle]::OpenExisting($ReadyEvent)
+if($Phase -ceq 'HoldLock'){
+    $start=[Threading.EventWaitHandle]::OpenExisting($ReleaseStartEvent)
+    $reader=[IO.FileStream]::new($Output,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    try {
+        $null=$ready.Set()
+        if(!$start.WaitOne(10000)){throw 'Publication test did not start'}
+        # Hold a real Windows deny-delete handle across the first ReplaceFile
+        # attempt, then release it inside the documented retry budget.
+        [Threading.Thread]::Sleep(200)
+    } finally {$reader.Dispose();$start.Dispose();$ready.Dispose()}
+    exit 0
+}
 $lines=Get-Content -LiteralPath $Writer
 $pattern=if($Phase -ceq 'BeforeFlush'){'^\s*\$stream\.Flush\(\$true\)'}else{'^\s*\[IO\.File\]::Replace\('}
 $boundaryLines=@(for($index=0;$index -lt $lines.Count;$index++){if($lines[$index] -match $pattern){$index+1}})

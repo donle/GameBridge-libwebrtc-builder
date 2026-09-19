@@ -108,12 +108,35 @@ Build and artifact flow:
    `candidate_rejected`, `channel_failed`, `media_write_failed`; bit 10 is unknown.
    Fatal/stale/metrics errors are checked first in deterministic validation
    order, with all original zero-error and performance bounds retained.
+   Missing-frame diagnostics include only accepted-but-unseen measurement
+   indices: first 64 sorted indices, exact total/omitted count, head/tail/interior
+   counts and contiguous-run sizes. Head and tail overlap if every frame is
+   missing; interior does not double-count that overlap. RTP timestamps are
+   derived from the fixed first timestamp and step, not network identifiers.
+   Counts before/during/after the unchanged two-second drain and last valid
+   callback age distinguish late delivery from persistent gaps.
+   Benchmark-only native injection/sender-transform/receiver-transform and
+   bitrate-update totals span the entire session, including prewarm. Numeric
+   RTCStats snapshots reuse the existing one-second polling, with sample age;
+   they are cumulative, possibly cached and not exact measurement-window
+   deltas. Absent values are omitted. Raw allocated bitrate and bandwidth
+   allocation are separate from candidate-pair available outgoing bitrate.
+   Inbound frame/decode-dependent stats need not equal receiver-transform
+   counts because this encoded-only bridge stops before the reference finder
+   and decoder. No extra stats polling or production diagnostics are enabled.
    Both initial and final public reports use same-directory staged writes,
    flush-to-disk and close before an atomic replacement. Existing reports use
    `File.Replace` (PowerShell `Move-Item -Force` has a delete window); first
-   publication uses a non-overwriting `Move-Item`. A failed or killed writer
-   leaves the preceding valid report intact, and temporary/raw files are not
-   upload inputs.
+   publication uses a non-overwriting `Move-Item`. Only the same `File.Replace`
+   operation may retry recognized Win32 IOExceptions 5/32/33/1175: at most 41
+   attempts within a 1000 ms elapsed retry budget, with delays at most 25 ms.
+   Individual synchronous OS calls are not timed out. Other errors, including
+   1176/1177 with different recovery semantics, fail without a fallback.
+   Serialization failure, tested persistent locks and cancellation before the
+   replace preserve the preceding valid report byte-for-byte. A transient lock
+   can release within the bounded window; this never reruns preparation or the
+   benchmark. Initial publication failure prevents preparation from starting.
+   Temporary/raw files are not upload inputs.
    The cold-start regression compiles the actual pinned injector method bodies
    with isolated engine dependencies; actual ABI CI also waits for one video
    frame before making any further media/data call.
@@ -139,6 +162,7 @@ Upstream references (pins are recorded separately in `pins.json`):
 - [Microsoft Windows SDK release downloads](https://learn.microsoft.com/en-us/windows/apps/windows-sdk/downloads)
 - [Hosted Windows runner limits](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 - [VS2026 runner image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-VS2026-Readme.md)
+- [Windows atomic replacement and error recovery semantics](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)
 
 Hosted image contents can change; its actual image version, source pins, GN
 arguments, SDK installer hash, reclaimed paths and disk readings are retained in

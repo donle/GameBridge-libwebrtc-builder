@@ -49,7 +49,18 @@ function ConvertTo-NativeRtcDiagnostic {
         'fatal_bridge_control_closed_errors','fatal_bridge_pointer_closed_errors','fatal_bridge_connection_errors','fatal_bridge_other_errors',
         'payload_size_errors','payload_content_errors','payload_matches_other_fixture','bridge_error_code_mask',
         'producer_late_frames','producer_bursts_under_1ms','producer_max_lateness_ms','producer_catchup_minimum_interval_ms',
+        'missing_frame_count','missing_head_frames','missing_tail_frames','missing_interior_frames','missing_frame_runs','missing_longest_run','missing_indices_omitted',
+        'measurement_first_rtp_timestamp','measurement_rtp_timestamp_step','frames_delivered_before_drain','frames_delivered_during_drain','frames_delivered_after_drain',
+        'drain_elapsed_ms','prewarm_frames_delivered','after_window_frames_delivered','keyframe_requests_total','last_frame_age_at_drain_end_ms',
+        'native_video_injections_total','native_video_sender_transforms_total','native_video_receiver_transforms_total',
+        'native_allocated_bitrate_bps','native_bandwidth_allocation_bps','native_bitrate_updates_total',
         'width','height','fps','consumer_exit_code')
+    foreach($role in @('sender','receiver')) {
+        foreach($metric in @('outbound_packets_sent','outbound_bytes_sent','outbound_frames_encoded','outbound_frames_sent',
+            'outbound_retransmitted_packets_sent','outbound_nack_count','outbound_total_packet_send_delay_seconds','outbound_target_bitrate_bps',
+            'inbound_packets_received','inbound_bytes_received','inbound_packets_lost','inbound_packets_discarded','inbound_frames_received',
+            'inbound_nack_count','available_outgoing_bitrate_bps','stats_age_ms')) {$numeric += "native_${role}_$metric"}
+    }
     $safe=[ordered]@{report_schema_version=2;passed=$false;diagnostic_stage=$Stage;requested_duration_seconds=$DurationSeconds;frames_expected_min=(Get-NativeRtcMinimumFrames $DurationSeconds)}
     $verdict=$Report.PSObject.Properties['passed']
     if($Stage -ceq 'complete' -and $null -ne $verdict -and $verdict.Value -is [bool]){$safe.passed=$verdict.Value}
@@ -88,7 +99,19 @@ function ConvertTo-NativeRtcDiagnostic {
         }else{$redacted++}
         $safe.bridge_latency_histogram=$buckets
     }
-    $known=$numeric+@($strings.Keys)+@('report_schema_version','passed','gc_applicable','bridge_latency_histogram','frames_expected_min','frames_dropped_callback_queue','frames_unaccounted_after_drain','diagnostic_stage','redacted_field_count')
+    $missing=$Report.PSObject.Properties['missing_frame_indices']
+    if($null -ne $missing){
+        $indices=@();$previous=-1
+        if($missing.Value -is [Array] -and $missing.Value.Count -le 64){
+            foreach($index in $missing.Value){
+                if((Test-NativeRtcDiagnosticNumber $index) -and $index -gt $previous -and $index -ge 0 -and $index -lt ($DurationSeconds*60) -and [math]::Floor($index) -eq $index){
+                    $indices += $index;$previous=$index
+                }else{$redacted++}
+            }
+        }else{$redacted++}
+        $safe.missing_frame_indices=$indices
+    }
+    $known=$numeric+@($strings.Keys)+@('report_schema_version','passed','gc_applicable','bridge_latency_histogram','missing_frame_indices','frames_expected_min','frames_dropped_callback_queue','frames_unaccounted_after_drain','diagnostic_stage','redacted_field_count')
     foreach($property in $Report.PSObject.Properties){if($property.Name -notin $known){$redacted++}}
     if($safe.Contains('frames_dropped_receiver')){$safe.frames_dropped_callback_queue=$safe.frames_dropped_receiver}
     $accounting=@('frames_submitted','frames_delivered','frames_dropped_bridge','frames_dropped_receiver')
@@ -97,6 +120,18 @@ function ConvertTo-NativeRtcDiagnostic {
     }
     $safe.redacted_field_count=$redacted
     [pscustomobject]$safe
+}
+
+function Test-NativeRtcTransientReplaceError([Exception]$Exception) {
+    # Static .NET calls are wrapped by PowerShell; only unwrap that invocation
+    # wrapper, never convert arbitrary failures into retryable IO failures.
+    while($Exception -is [Management.Automation.MethodInvocationException] -and $null -ne $Exception.InnerException){$Exception=$Exception.InnerException}
+    if($Exception -isnot [IO.IOException]){return $false}
+    $hresult=[long]$Exception.HResult -band 0xffffffffL
+    if(($hresult -band 0xffff0000L) -ne 0x80070000L){return $false}
+    # Access/sharing/lock and unable-to-remove-replaced preserve the original
+    # names. Do NOT retry 1176/1177: ReplaceFile documents different recovery.
+    ($hresult -band 0xffffL) -in @(5,32,33,1175)
 }
 
 function Write-NativeRtcDiagnostic($Report,[string]$Path,[switch]$Quiet) {
@@ -116,7 +151,24 @@ function Write-NativeRtcDiagnostic($Report,[string]$Path,[switch]$Quiet) {
         if([IO.File]::Exists($destination)) {
             # Move-Item -Force deletes an existing destination before moving
             # in PowerShell's provider. ReplaceFile preserves atomic overwrite.
-            [IO.File]::Replace($temporary,$destination,[NullString]::Value)
+            # Retry only this same atomic operation: <=41 attempts, <=1000 ms
+            # elapsed retry budget, <=25 ms between attempts. An OS call itself
+            # is synchronous, so this is not a filesystem-call timeout. Neither
+            # serialization, preparation nor the benchmark is repeated.
+            $retryTimer=[Diagnostics.Stopwatch]::StartNew()
+            $attempt=0
+            while($true){
+                $attempt++
+                try {
+                    [IO.File]::Replace($temporary,$destination,[NullString]::Value)
+                    break
+                } catch {
+                    if(!(Test-NativeRtcTransientReplaceError $_.Exception) -or $attempt -ge 41 -or $retryTimer.ElapsedMilliseconds -ge 1000 -or ![IO.File]::Exists($temporary) -or ![IO.File]::Exists($destination)){throw}
+                    $delay=[math]::Min(25,[math]::Max(1,1000-$retryTimer.ElapsedMilliseconds))
+                    Start-Sleep -Milliseconds $delay
+                    if($retryTimer.ElapsedMilliseconds -ge 1000){throw}
+                }
+            }
         } else {
             # Same-directory first publication is a rename, without -Force or
             # a delete/copy fallback if another publisher creates the target.

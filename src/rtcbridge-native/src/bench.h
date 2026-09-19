@@ -78,6 +78,7 @@ GB_RTC_API uint32_t GB_RTC_CALL gb_rtc_bench_end(uint8_t *output,
       return 0;
     Engine().signaling->BlockingCall([&] { b->sender->dequeue_observer = {}; });
     std::ostringstream json;
+    json.precision(12);
     json << "{\"rtc_backend\":\"libwebrtc\",\"libwebrtc_revision\":"
             "\"c250ac7568212f05892447d8e8673f8e55d716d9\","
             "\"gc_applicable\":false,\"gc_pause_ms_max\":0,\"gc_cycles\":0,"
@@ -91,7 +92,31 @@ GB_RTC_API uint32_t GB_RTC_CALL gb_rtc_bench_end(uint8_t *output,
          << ReceiverDrops(b->receiver->received_video,
                           b->receiver->receive_contention[0]) -
                 b->receiver_drops
-         << ",\"bridge_latency_histogram\":[";
+         << ",\"native_video_injections_total\":"
+         << b->sender->video_injections.load()
+         << ",\"native_video_sender_transforms_total\":"
+         << b->sender->video_sender_transforms.load()
+         << ",\"native_video_receiver_transforms_total\":"
+         << b->receiver->video_receiver_transforms.load()
+         << ",\"native_allocated_bitrate_bps\":"
+         << b->sender->allocated_bitrate.load()
+         << ",\"native_bandwidth_allocation_bps\":"
+         << b->sender->bandwidth_allocation.load()
+         << ",\"native_bitrate_updates_total\":"
+         << b->sender->video_bitrate_updates.load();
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    {
+      std::lock_guard lock(b->sender->diagnostic_mutex);
+      b->sender->diagnostic_stats.Write(json, "native_sender_", now.QuadPart,
+                                        b->frequency);
+    }
+    {
+      std::lock_guard lock(b->receiver->diagnostic_mutex);
+      b->receiver->diagnostic_stats.Write(json, "native_receiver_",
+                                          now.QuadPart, b->frequency);
+    }
+    json << ",\"bridge_latency_histogram\":[";
     bool comma = false;
     for (size_t i = 0; i < b->histogram.buckets.size(); ++i)
       if (b->histogram.buckets[i]) {

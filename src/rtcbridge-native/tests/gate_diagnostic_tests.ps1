@@ -55,6 +55,31 @@ try {
         $sanitized=ConvertTo-NativeRtcDiagnostic ([pscustomobject]$private) 5 'consumer' | ConvertTo-Json -Depth 10
         if($sanitized.Contains('PRIVATE_SENTINEL')){throw 'Opaque fatal detail leaked'}
     }
+    $deliveryFields=@('missing_frame_count','missing_head_frames','missing_tail_frames','missing_interior_frames',
+        'missing_frame_runs','missing_longest_run','missing_indices_omitted','measurement_first_rtp_timestamp','measurement_rtp_timestamp_step',
+        'frames_delivered_before_drain','frames_delivered_during_drain','frames_delivered_after_drain','drain_elapsed_ms',
+        'prewarm_frames_delivered','after_window_frames_delivered','keyframe_requests_total','last_frame_age_at_drain_end_ms',
+        'native_video_injections_total','native_video_sender_transforms_total','native_video_receiver_transforms_total',
+        'native_allocated_bitrate_bps','native_bandwidth_allocation_bps','native_bitrate_updates_total')
+    foreach($role in @('sender','receiver')) {
+        foreach($metric in @('outbound_packets_sent','outbound_bytes_sent','outbound_frames_encoded','outbound_frames_sent',
+            'outbound_retransmitted_packets_sent','outbound_nack_count','outbound_total_packet_send_delay_seconds','outbound_target_bitrate_bps',
+            'inbound_packets_received','inbound_bytes_received','inbound_packets_lost','inbound_packets_discarded','inbound_frames_received',
+            'inbound_nack_count','available_outgoing_bitrate_bps','stats_age_ms')) {$deliveryFields += "native_${role}_$metric"}
+    }
+    $delivery=@{passed=$false;missing_frame_indices=@(0,1,119,238,299)}
+    foreach($name in $deliveryFields){$delivery[$name]=7}
+    $projected=ConvertTo-NativeRtcDiagnostic ([pscustomobject]$delivery) 5 'validation'
+    foreach($name in $deliveryFields){if($null -eq $projected.PSObject.Properties[$name] -or $projected.$name -ne 7){throw "Safe delivery diagnostic omitted: $name"}}
+    if(($projected.missing_frame_indices -join ',') -cne '0,1,119,238,299'){throw 'Missing index distribution was not retained'}
+    foreach($invalidIndices in @(@('PRIVATE_SENTINEL',-1,0.5,300,[double]::NaN,[pscustomobject]@{sdp='PRIVATE_SENTINEL'}),@(0..64))) {
+        $delivery.missing_frame_indices=$invalidIndices
+        $projected=ConvertTo-NativeRtcDiagnostic ([pscustomobject]$delivery) 5 'validation'
+        if(@($projected.missing_frame_indices).Count -ne 0 -or ($projected | ConvertTo-Json -Depth 10).Contains('PRIVATE_SENTINEL')){throw 'Unsafe/unbounded missing indices escaped'}
+    }
+    $delivery.missing_frame_indices=@(0..63)
+    $projected=ConvertTo-NativeRtcDiagnostic ([pscustomobject]$delivery) 5 'validation'
+    if(@($projected.missing_frame_indices).Count -ne 64){throw 'Valid bounded missing index sample rejected'}
 
     $launcher=Get-Content -Raw -LiteralPath "$repository/scripts/test-rtc-native-gate.ps1"
     if($launcher -notmatch '& \$consumer \$DurationSeconds \$fixture \$dll \$rawResultPath' -or $launcher -match '& \$consumer .* \$resultPath'){throw 'Raw consumer output overlaps the published sanitized report'}

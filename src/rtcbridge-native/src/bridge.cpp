@@ -17,6 +17,9 @@
 #include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "core.h"
 #include "json.h"
+#ifdef GB_RTC_BENCH
+#include "transport_diagnostics.h"
+#endif
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
 #include "rtc_base/win32_socket_init.h"
@@ -175,6 +178,13 @@ public:
   CallbackGate callbacks;
   std::function<void(uint32_t)>
       dequeue_observer; // populated only by benchmark DLL
+#ifdef GB_RTC_BENCH
+  std::atomic<uint64_t> video_injections{}, video_sender_transforms{},
+      video_receiver_transforms{}, video_bitrate_updates{};
+  std::atomic<int64_t> allocated_bitrate{}, bandwidth_allocation{};
+  std::mutex diagnostic_mutex;
+  TransportSnapshot diagnostic_stats;
+#endif
 #ifdef GB_RTC_TESTING
   gb_rtc_result Probe(uint32_t kind, std::span<const uint8_t> bytes) {
     return callbacks.Invoke([&] {
@@ -579,6 +589,15 @@ public:
           auto self = weak.lock();
           if (!self || self->closed)
             return;
+#ifdef GB_RTC_BENCH
+          TransportSnapshot diagnostics;
+          for (const auto *stats :
+               report.GetStatsOfType<w::RTCOutboundRtpStreamStats>())
+            diagnostics.ObserveOutbound(*stats);
+          for (const auto *stats :
+               report.GetStatsOfType<w::RTCInboundRtpStreamStats>())
+            diagnostics.ObserveInbound(*stats);
+#endif
           for (const auto *transport :
                report.GetStatsOfType<w::RTCTransportStats>()) {
             if (!transport->selected_candidate_pair_id)
@@ -588,6 +607,10 @@ public:
             if (!pair || !pair->local_candidate_id ||
                 !pair->remote_candidate_id)
               continue;
+#ifdef GB_RTC_BENCH
+            diagnostics.AvailableOutgoingBitrate(
+                pair->available_outgoing_bitrate);
+#endif
             const auto *local = report.GetAs<w::RTCLocalIceCandidateStats>(
                 *pair->local_candidate_id);
             const auto *remote = report.GetAs<w::RTCRemoteIceCandidateStats>(
@@ -600,6 +623,15 @@ public:
             self->Queue(GB_RTC_EVENT_ROUTE,
                         relay ? "{\"route\":2}" : "{\"route\":1}");
           }
+#ifdef GB_RTC_BENCH
+          LARGE_INTEGER now{};
+          QueryPerformanceCounter(&now);
+          diagnostics.sampled_qpc = now.QuadPart;
+          {
+            std::lock_guard lock(self->diagnostic_mutex);
+            self->diagnostic_stats = std::move(diagnostics);
+          }
+#endif
           self->Metrics();
         });
     pc_->GetStats(observer.get());
@@ -671,6 +703,10 @@ private:
             auto self = weak.lock();
             if (!self || self->closed || self->failed)
               return;
+#ifdef GB_RTC_BENCH
+            if (kind == 0)
+              ++self->video_sender_transforms;
+#endif
             // Upstream adds a random sender timestamp offset. The public bridge
             // ABI carries the caller's exact modulo clock, so overwrite it
             // here.
@@ -687,13 +723,21 @@ private:
                   if (auto self = weak.lock())
                     self->Queue(GB_RTC_EVENT_KEYFRAME_REQUEST, "{}");
                 },
-                [weak](int32_t allocated, int32_t) {
-                  if (auto self = weak.lock())
+                [weak](int32_t allocated, int32_t bandwidth) {
+                  if (auto self = weak.lock()) {
+#ifdef GB_RTC_BENCH
+                    self->allocated_bitrate = allocated;
+                    self->bandwidth_allocation = bandwidth;
+                    ++self->video_bitrate_updates;
+#else
+                    (void)bandwidth;
+#endif
                     self->Queue(GB_RTC_EVENT_BITRATE,
                                 "{\"bitsPerSecond\":" +
                                     std::to_string(std::clamp(
                                         allocated, 1000000, 40000000)) +
                                     "}");
+                  }
                 });
       else
         audio_injector_ =
@@ -728,6 +772,10 @@ private:
           auto self = weak.lock();
           if (!self || self->closed || self->failed)
             return;
+#ifdef GB_RTC_BENCH
+          if (is_video)
+            ++self->video_receiver_transforms;
+#endif
           const auto bytes = frame->GetData();
           if (bytes.empty() ||
               bytes.size() > (is_video ? GB_RTC_MAX_VIDEO_BYTES
@@ -768,6 +816,9 @@ private:
       inflight_[kind] = true;
       inflight_timestamp_[kind] = media->timestamp;
       if (kind == 0) {
+#ifdef GB_RTC_BENCH
+        ++video_injections;
+#endif
         if (dequeue_observer)
           dequeue_observer(media->timestamp);
         auto frame = w::CreateOutgoingVideoFrame(

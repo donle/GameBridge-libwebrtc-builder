@@ -30,13 +30,67 @@ try {
     if((Get-Content -Raw -LiteralPath $result | ConvertFrom-Json).frames_delivered -ne 292){throw 'Complete replacement was not published'}
     $previous=[IO.File]::ReadAllText($result)
 
+    # An independent process holds a real deny-delete handle. Retrying only
+    # the atomic replacement must succeed once it releases, without rewriting
+    # JSON or changing the old published snapshot while the lock is held.
+    $eventName='Local\GameBridgeReportLock'+[guid]::NewGuid().ToString('N')
+    $ready=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$eventName)
+    $start=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,($eventName+'Start'))
+    try {
+        $shell=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'gate_atomic_child.ps1')+'"'),'-Writer',('"'+$writer+'"'),'-Output',('"'+$result+'"'),'-ReadyEvent',$eventName,'-Phase','HoldLock','-ReleaseStartEvent',($eventName+'Start'))
+        $child=Start-Process -FilePath $shell -ArgumentList $arguments -WindowStyle Hidden -PassThru
+        if(!$ready.WaitOne(10000)){throw 'Publication lock child did not acquire the destination'}
+        Assert-PreviousReport $previous
+        $timer=[Diagnostics.Stopwatch]::StartNew()
+        $null=$start.Set()
+        try {Write-NativeRtcDiagnostic $first $result -Quiet}
+        catch {
+            $cause=$_.Exception
+            while($null -ne $cause.InnerException){$cause=$cause.InnerException}
+            throw "Transient publication lock was not retried: $($cause.GetType().Name) HResult=$($cause.HResult)"
+        }
+        if($timer.ElapsedMilliseconds -lt 100 -or $timer.ElapsedMilliseconds -gt 3000){throw 'Transient replacement did not respect the bounded lock window'}
+        if(!$child.WaitForExit(5000) -or $child.ExitCode -ne 0){throw 'Publication lock child failed'}
+        $child.Dispose();$child=$null
+        if(([IO.File]::ReadAllText($result) | ConvertFrom-Json).frames_delivered -ne 291){throw 'Unlocked atomic replacement was not published'}
+        $previous=[IO.File]::ReadAllText($result)
+    } finally {
+        if($null -ne $child){if(!$child.HasExited){Stop-Process -InputObject $child -Force};$child.Dispose();$child=$null}
+        $ready.Dispose();$start.Dispose()
+    }
+
+    # Only recognized Win32-backed IOExceptions permit another ReplaceFile.
+    # 1176/1177 have different recovery semantics and must never be retried.
+    foreach($code in @(5,32,33,1175,2,112,1176,1177)){
+        $errorCode=[int]([long]$code-2147024896L)
+        $exception=[IO.IOException]::new('PRIVATE_SENTINEL',$errorCode)
+        $expected=$code -in @(5,32,33,1175)
+        if((Test-NativeRtcTransientReplaceError $exception) -ne $expected){throw "Unexpected replacement retry classification: $code"}
+    }
+    foreach($exception in @([IO.IOException]::new('PRIVATE_SENTINEL'),[UnauthorizedAccessException]::new('PRIVATE_SENTINEL'),[InvalidOperationException]::new('PRIVATE_SENTINEL'))){
+        if(Test-NativeRtcTransientReplaceError $exception){throw 'Non-Win32 or non-IO failure was made retryable'}
+    }
+
     # Actual replacement failure: permit writes but deny delete/rename. No
     # delete-then-move or in-place fallback may damage the published report.
     $reader=[IO.FileStream]::new($result,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
     try {
         $rejected=$false
+        $timer=[Diagnostics.Stopwatch]::StartNew()
         try { Write-NativeRtcDiagnostic $first $result 6>$null } catch { $rejected=$true }
         if(!$rejected){throw 'A blocked atomic replacement was silently bypassed'}
+        if($timer.ElapsedMilliseconds -lt 750 -or $timer.ElapsedMilliseconds -gt 3000){throw 'Persistent lock did not exhaust a bounded replacement window'}
+        Assert-PreviousReport $previous
+
+        # Initial publication is a prerequisite, outside the benchmark's try
+        # block. If it cannot invalidate the prior report, do not even create
+        # raw output or call the first external preparation command.
+        $script:externalStarted=$false
+        function Invoke-ForbiddenNativeGateExternal {$script:externalStarted=$true;throw 'Benchmark preparation must not run'}
+        $rejected=$false
+        try {& (Join-Path $repository 'scripts/test-rtc-native-gate.ps1') -DurationSeconds 5 -ArtifactDirectory $scratch -Output $result -FFmpeg 'Invoke-ForbiddenNativeGateExternal' 6>$null} catch {$rejected=$true}
+        if(!$rejected -or $script:externalStarted -or [IO.File]::Exists($result+'.consumer.json')){throw 'Initial publication failure proceeded into benchmark preparation'}
         Assert-PreviousReport $previous
     } finally { $reader.Dispose() }
 
@@ -86,7 +140,7 @@ try {
     }
     $launcher=Get-Content -Raw -LiteralPath (Join-Path $repository 'scripts/test-rtc-native-gate.ps1')
     if($launcher -match 'Set-Content -LiteralPath \$resultPath' -or $launcher -notmatch 'Write-NativeRtcDiagnostic \$initial \$resultPath'){throw 'Initial report bypasses atomic publication'}
-    Write-Host 'Native report atomicity: real reader snapshots, replace failure, serialization failure and killed pre-flush/pre-replace writers PASS'
+    Write-Host 'Native report atomicity: real reader snapshots, bounded transient/persistent locks, initial fail-closed, serialization failure and killed pre-flush/pre-replace writers PASS'
 } finally {
     if($null -ne $child){if(!$child.HasExited){Stop-Process -InputObject $child -Force};$child.Dispose()}
     $parent=[IO.Path]::GetFullPath((Join-Path $repository 'out'))+'\'

@@ -32,6 +32,10 @@ template <class C> void ReasonsAndPhases() {
                   c.payload_size_errors.load();
                   c.payload_content_errors.load();
                   c.payload_matches_other_fixture.load();
+                  c.prewarm_delivered.load();
+                  c.after_window_delivered.load();
+                  c.keyframe_requests.load();
+                  c.last_arrival_qpc.load();
                 }) {
     std::vector<Frame> frames{{{7}, 0, true}, {{8}, 0, false}};
     for (auto &frame : frames)
@@ -50,6 +54,11 @@ template <class C> void ReasonsAndPhases() {
     Video(c, 1, 8);
     Check(c.delivered == 0 && c.fatal == 1,
           "valid prewarm must not be counted or rejected");
+    Check(c.prewarm_delivered == 2,
+          "validated prewarm callbacks need a separate observation count");
+    callback(&c, GB_RTC_EVENT_KEYFRAME_REQUEST, nullptr, 0);
+    Check(c.keyframe_requests == 1,
+          "keyframe request telemetry must not be lost");
     Video(c, 0, 7, 1);
     Check(c.fatal_reason[1] == 1 && c.fatal_phase[1] == 1,
           "timestamp error classification");
@@ -59,6 +68,8 @@ template <class C> void ReasonsAndPhases() {
     Video(c, 6);
     Check(c.fatal == 2 && c.delivered == 0,
           "measurement window semantics changed");
+    Check(c.after_window_delivered == 1,
+          "post-window callbacks need a separate observation count");
     std::array<uint8_t, 17> invalidRange{};
     gb_rtc_media_event invalidHeader{16, 1, 2 * c.step, 2};
     std::memcpy(invalidRange.data(), &invalidHeader, sizeof(invalidHeader));
@@ -70,6 +81,8 @@ template <class C> void ReasonsAndPhases() {
     Video(c, 2);
     Check(c.delivered == 1 && c.fatal_reason[3] == 1,
           "duplicate must remain fatal");
+    Check(c.last_arrival_qpc > 0,
+          "valid measured arrival must expose an age without raw timestamps");
     Video(c, 3); // fixture index 1 is {8}; complete bytes match wrong fixture
                  // index 0
     Check(c.fatal_reason[4] == 1 && c.payload_content_errors == 1 &&
@@ -127,9 +140,47 @@ template <class C> void ReasonsAndPhases() {
   }
 }
 } // namespace
+template <class C> void MissingDistribution() {
+  if constexpr (requires(C &c, const std::vector<uint8_t> &accepted) {
+                  c.SummarizeMissing(accepted);
+                }) {
+    C c;
+    std::vector<uint8_t> accepted(12, 1);
+    c.seen.assign(12, 1);
+    for (const auto index : {0, 1, 4, 5, 9, 10, 11})
+      c.seen[index] = 0;
+    auto missing = c.SummarizeMissing(accepted);
+    Check(missing.total == 7 && missing.head == 2 && missing.tail == 3 &&
+              missing.interior == 2 && missing.runs == 3 &&
+              missing.longest == 3,
+          "missing head/tail/interior distribution must reconcile");
+    Check(missing.samples == 7 && missing.indices[0] == 0 &&
+              missing.indices[6] == 11 && missing.omitted == 0,
+          "missing sample indices must be sorted measurement-relative values");
+    accepted[4] = 0;
+    missing = c.SummarizeMissing(accepted);
+    Check(missing.total == 6 && missing.interior == 1,
+          "submission failures must not become transport missing frames");
+    c.seen.assign(100, 0);
+    accepted.assign(100, 1);
+    missing = c.SummarizeMissing(accepted);
+    Check(missing.total == 100 && missing.head == 100 && missing.tail == 100 &&
+              missing.interior == 0 && missing.runs == 1 &&
+              missing.longest == 100 && missing.samples == 64 &&
+              missing.omitted == 36,
+          "all missing overlap and bounded 64-index output");
+    c.seen.assign(100, 1);
+    missing = c.SummarizeMissing(accepted);
+    Check(missing.total == 0 && missing.samples == 0 && missing.runs == 0,
+          "complete delivery must have an empty missing distribution");
+  } else {
+    Check(false, "consumer lacks bounded missing-frame distribution");
+  }
+}
 int main() {
   try {
     ReasonsAndPhases<Context>();
+    MissingDistribution<Context>();
     std::puts("RTC consumer diagnostics: actual callback reasons, phases, "
               "teardown and stale barrier PASS");
     return 0;

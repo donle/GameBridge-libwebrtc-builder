@@ -120,6 +120,11 @@ executable("rtc_bench_diagnostics_tests") {
   libs = [ "psapi.lib" ]
 }
 
+executable("rtc_transport_diagnostics_tests") {
+  sources = [ "tests/transport_diagnostics_tests.cpp" ]
+  configs += [ ":bridge_config" ]
+}
+
 group("all") {
   deps = [
     ":gamebridge_rtc",
@@ -132,5 +137,6 @@ group("all") {
     ":rtc_injector_cold_start_tests",
     ":rtc_native_core_tests",
     ":rtc_runtime_socket_tests",
+    ":rtc_transport_diagnostics_tests",
   ]
 }

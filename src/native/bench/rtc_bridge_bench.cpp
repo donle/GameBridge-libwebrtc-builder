@@ -141,6 +141,11 @@ enum class FatalReason : unsigned {
   Other
 };
 enum class Phase : unsigned { Setup, Prewarm, Measurement, Drain, Teardown };
+struct MissingFrames {
+  uint32_t total{}, head{}, tail{}, interior{}, runs{}, longest{}, samples{},
+      omitted{};
+  std::array<uint32_t, 64> indices{};
+};
 struct Context {
   struct Signal {
     uint32_t type;
@@ -151,6 +156,9 @@ struct Context {
   const std::vector<Frame> *frames{};
   std::vector<uint8_t> seen;
   std::atomic<uint64_t> delivered{}, bytes{}, fatal{}, stale{};
+  std::atomic<uint64_t> prewarm_delivered{}, after_window_delivered{},
+      keyframe_requests{};
+  std::atomic<int64_t> last_arrival_qpc{};
   std::array<std::atomic<uint64_t>, 7> fatal_reason{};
   std::array<std::atomic<uint64_t>, 5> fatal_phase{};
   // Fixed codes only: control closed, pointer closed, connection failed, other.
@@ -165,6 +173,36 @@ struct Context {
     ++fatal_reason[static_cast<unsigned>(reason)];
     ++fatal_phase[phase.load()];
     ++fatal;
+  }
+  // Called only after both close barriers, when seen is no longer being
+  // written.
+  MissingFrames SummarizeMissing(const std::vector<uint8_t> &accepted) const {
+    require(accepted.size() == seen.size(), "missing_frame_accounting");
+    MissingFrames result;
+    auto missing = [&](size_t index) {
+      return accepted[index] && !seen[index];
+    };
+    uint32_t run = 0;
+    for (size_t i = 0; i < seen.size(); ++i) {
+      if (!missing(i)) {
+        run = 0;
+        continue;
+      }
+      ++result.total;
+      if (!run++)
+        ++result.runs;
+      result.longest = std::max(result.longest, run);
+      if (result.samples < result.indices.size())
+        result.indices[result.samples++] = uint32_t(i);
+    }
+    while (result.head < seen.size() && missing(result.head))
+      ++result.head;
+    while (result.tail < seen.size() && missing(seen.size() - 1 - result.tail))
+      ++result.tail;
+    result.interior =
+        result.total - std::min(result.total, result.head + result.tail);
+    result.omitted = result.total - result.samples;
+    return result;
   }
 };
 void __cdecl callback(void *pointer, uint32_t type, const uint8_t *data,
@@ -208,6 +246,10 @@ void __cdecl callback(void *pointer, uint32_t type, const uint8_t *data,
       if (std::string_view(reinterpret_cast<const char *>(data), size) ==
           "{\"state\":3}")
         c.connected = true;
+      return;
+    }
+    if (type == GB_RTC_EVENT_KEYFRAME_REQUEST) {
+      ++c.keyframe_requests;
       return;
     }
     if (type == GB_RTC_EVENT_ROUTE) {
@@ -262,13 +304,20 @@ void __cdecl callback(void *pointer, uint32_t type, const uint8_t *data,
       c.RecordFatal(FatalReason::Payload);
       return;
     }
-    if (index < c.first || index >= c.first + c.count)
+    if (index < c.first) {
+      ++c.prewarm_delivered;
       return;
+    }
+    if (index >= c.first + c.count) {
+      ++c.after_window_delivered;
+      return;
+    }
     if (c.seen[index - c.first]++) {
       c.RecordFatal(FatalReason::Duplicate);
       return;
     }
     c.bytes.fetch_add(h.data_size);
+    c.last_arrival_qpc = qpc();
     ++c.delivered;
   } catch (...) {
     c.RecordFatal(FatalReason::Other);
@@ -362,6 +411,7 @@ int run(int argc, char **argv) {
   Peers peers(api);
   const auto count = static_cast<uint32_t>(seconds * 60);
   std::vector<int64_t> stamps(count);
+  std::vector<uint8_t> accepted(count);
   for (auto &c : peers.context) {
     c.frames = &frames;
     c.count = count;
@@ -391,6 +441,7 @@ int run(int argc, char **argv) {
     const auto result = api.video(peers.handles[0], &v);
     if (recorded) {
       if (result == GB_RTC_OK) {
+        accepted[index - 600] = 1;
         ++submitted;
         sendBytes += f.data.size();
       } else {
@@ -442,11 +493,16 @@ int run(int argc, char **argv) {
   timer.until(start + static_cast<int64_t>(seconds) * frequency.QuadPart);
   const double elapsed = static_cast<double>(qpc() - start) /
                          static_cast<double>(frequency.QuadPart);
+  const auto drainStart = qpc();
+  const auto deliveredBeforeDrain = peers.context[1].delivered.load();
   const auto drain = Clock::now() + std::chrono::seconds(2);
   for (auto &c : peers.context)
     c.phase = static_cast<unsigned>(Phase::Drain);
   while (peers.context[1].delivered < submitted && Clock::now() < drain)
     Sleep(1);
+  const auto drainEnd = qpc();
+  const auto deliveredAfterDrain = peers.context[1].delivered.load();
+  const auto lastArrivalAtDrainEnd = peers.context[1].last_arrival_qpc.load();
   const auto ending = memory();
   peak = std::max(peak, memory(true));
   std::vector<uint8_t> metrics(65536);
@@ -479,6 +535,39 @@ int run(int argc, char **argv) {
   require(bool(out), "report_open");
   out << std::setprecision(12);
   out.write(reinterpret_cast<const char *>(metrics.data()), length - 1);
+  const auto missing = peers.context[1].SummarizeMissing(accepted);
+  out << ",\"missing_frame_count\":" << missing.total
+      << ",\"missing_head_frames\":" << missing.head
+      << ",\"missing_tail_frames\":" << missing.tail
+      << ",\"missing_interior_frames\":" << missing.interior
+      << ",\"missing_frame_runs\":" << missing.runs
+      << ",\"missing_longest_run\":" << missing.longest
+      << ",\"missing_indices_omitted\":" << missing.omitted
+      << ",\"measurement_first_rtp_timestamp\":900000,\"measurement_rtp_"
+         "timestamp_step\":1500"
+      << ",\"missing_frame_indices\":[";
+  for (uint32_t i = 0; i < missing.samples; ++i) {
+    if (i)
+      out << ',';
+    out << missing.indices[i];
+  }
+  out << ']' << ",\"frames_delivered_before_drain\":" << deliveredBeforeDrain
+      << ",\"frames_delivered_during_drain\":"
+      << deliveredAfterDrain - deliveredBeforeDrain
+      << ",\"frames_delivered_after_drain\":"
+      << peers.context[1].delivered.load() - deliveredAfterDrain
+      << ",\"drain_elapsed_ms\":"
+      << double(drainEnd - drainStart) * 1000 / frequency.QuadPart
+      << ",\"prewarm_frames_delivered\":"
+      << peers.context[1].prewarm_delivered.load()
+      << ",\"after_window_frames_delivered\":"
+      << peers.context[1].after_window_delivered.load()
+      << ",\"keyframe_requests_total\":"
+      << peers.context[0].keyframe_requests +
+             peers.context[1].keyframe_requests;
+  if (lastArrivalAtDrainEnd > 0 && lastArrivalAtDrainEnd <= drainEnd)
+    out << ",\"last_frame_age_at_drain_end_ms\":"
+        << double(drainEnd - lastArrivalAtDrainEnd) * 1000 / frequency.QuadPart;
   constexpr const char *reasons[] = {"header",    "timestamp", "range",
                                      "duplicate", "payload",   "bridge",
                                      "other"};
