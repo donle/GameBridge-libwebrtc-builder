@@ -1,0 +1,42 @@
+name: Build pinned native RTC bridge
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: native-rtc-builder
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Build and test only on ephemeral hosted Windows
+        run: ./scripts/build-libwebrtc-ci.ps1
+      - name: Attest the exact archive after ABI and five-second gate pass
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45
+        with:
+          subject-path: out/rtc-package/gamebridge-rtc-windows-x64.zip
+      - name: Upload signed archive and SHA-256
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gamebridge-rtc-libwebrtc-${{ github.sha }}
+          path: |
+            out/rtc-package/gamebridge-rtc-windows-x64.zip
+            out/rtc-package/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

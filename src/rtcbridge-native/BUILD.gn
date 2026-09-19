@@ -1,0 +1,106 @@
+import("//webrtc.gni")
+
+config("bridge_config") {
+  include_dirs = [
+    "include",
+    "src",
+    "../rtcbridge/include",
+  ]
+  defines = [
+    "NOMINMAX",
+    "WIN32_LEAN_AND_MEAN",
+  ]
+  cflags_cc = [ "/EHsc" ]
+}
+
+foreach(variant,
+        [
+          "gamebridge_rtc",
+          "gamebridge_rtc_probe",
+          "gamebridge_rtc_bench",
+        ]) {
+  shared_library(variant) {
+    sources = [ "src/bridge.cpp" ]
+    configs -= [ "//build/config/compiler:no_exceptions" ]
+    configs += [
+      "//build/config/compiler:exceptions",
+      "//:common_config",
+      ":bridge_config",
+    ]
+    if (variant == "gamebridge_rtc_probe") {
+      defines = [ "GB_RTC_TESTING" ]
+    }
+    if (variant == "gamebridge_rtc_bench") {
+      defines = [ "GB_RTC_BENCH" ]
+    }
+    deps = [
+      "//api:create_peerconnection_factory",
+      "//api:frame_transformer_factory",
+      "//api:make_ref_counted",
+      "//api:peer_connection_interface",
+      "//api:rtc_stats_api",
+      "//api:rtp_parameters",
+      "//api/audio:create_audio_device_module",
+      "//api/audio_codecs:builtin_audio_decoder_factory",
+      "//api/audio_codecs:builtin_audio_encoder_factory",
+      "//api/environment:environment_factory",
+      "//api/video_codecs:builtin_video_decoder_factory",
+      "//api/video_codecs:builtin_video_encoder_factory",
+      "//rtc_base:logging",
+      "//rtc_base:ssl",
+      "//rtc_base:threading",
+    ]
+  }
+}
+
+executable("rtc_native_core_tests") {
+  sources = [ "tests/core_tests.cpp" ]
+  configs -= [ "//build/config/compiler:no_exceptions" ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    ":bridge_config",
+  ]
+  libs = [ "ws2_32.lib" ]
+}
+
+executable("rtc_injector_cold_start_tests") {
+  sources = [ "tests/injector_cold_start_tests.cpp" ]
+  configs += [ ":bridge_config" ]
+}
+
+executable("rtc_abi_tests") {
+  sources = [
+    "../native/tests/rtc_abi_c_layout.c",
+    "../native/tests/rtc_abi_tests.cpp",
+  ]
+  configs -= [ "//build/config/compiler:no_exceptions" ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    ":bridge_config",
+  ]
+}
+
+executable("rtc_bridge_bench") {
+  sources = [ "../native/bench/rtc_bridge_bench.cpp" ]
+  configs -= [ "//build/config/compiler:no_exceptions" ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    ":bridge_config",
+  ]
+  libs = [
+    "psapi.lib",
+    "winmm.lib",
+  ]
+}
+
+group("all") {
+  deps = [
+    ":gamebridge_rtc",
+    ":gamebridge_rtc_bench",
+    ":gamebridge_rtc_probe",
+    ":rtc_abi_tests",
+    ":rtc_bridge_bench",
+    ":rtc_injector_cold_start_tests",
+    ":rtc_native_core_tests",
+  ]
+}

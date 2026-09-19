@@ -1,0 +1,18 @@
+diff --git a/pc/encoded_video_frame_injector.cc b/pc/encoded_video_frame_injector.cc
+--- a/pc/encoded_video_frame_injector.cc
++++ b/pc/encoded_video_frame_injector.cc
+@@ -393,6 +393,14 @@ void EncodedVideoFrameInjector::RegisterEncoder(ProxyVideoEncoder* encoder) {
+   RTC_CHECK(!encoder_ || encoder_ == encoder);
+ 
+   encoder_ = encoder;
++  // The first injected frame bootstraps the encoder asynchronously. Drain on
++  // readiness: a bounded, one-in-flight caller must not need a second frame
++  // to release the first. InjectEncodedFrame posts onto the encoder queue,
++  // after its current initialization task has completed.
++  while (!buffered_frames_.empty()) {
++    encoder_->InjectEncodedFrame(std::move(buffered_frames_.front()));
++    buffered_frames_.pop_front();
++  }
+ }
+ 
+ void EncodedVideoFrameInjector::InvokeKeyFrameCallback() {

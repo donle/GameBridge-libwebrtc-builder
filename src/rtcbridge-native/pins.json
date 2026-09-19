@@ -1,0 +1,16 @@
+{
+  "webrtc_revision": "c250ac7568212f05892447d8e8673f8e55d716d9",
+  "encoder_ready_patch_sha256": "51d9cb6d62d8be233934c9073c0936f8cccab84cf7d3075b3939eb06832d6c8e",
+  "depot_tools_revision": "0306e4682b4ac35287c726fa35a983157a625902",
+  "chromium_build_revision": "a56d226360eb0b3eaf423bfbf3cfe35a19e4951a",
+  "runner": "windows-2025-vs2026",
+  "visual_studio_major": 18,
+  "windows_sdk_directory_version": "10.0.28000.0",
+  "windows_sdk_minimum_file_version": "10.0.28000.2270",
+  "minimum_free_gib": 60,
+  "windows_sdk_installer_url": "https://download.microsoft.com/download/78b533c3-6724-4e28-a984-b9fa93265781/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe",
+  "windows_sdk_installer_sha256": "e9f1bde566381355e594e2f90daf4f714eb5c7ef2c45c501ce236afe2abea300",
+  "ffmpeg_url": "https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-essentials_build.zip",
+  "ffmpeg_sha256": "6f58ce889f59c311410f7d2b18895b33c03456463486f3b1ebc93d97a0f54541",
+  "gn_args": "is_debug=false is_component_build=false target_cpu=\"x64\" rtc_include_tests=false rtc_build_examples=false rtc_use_h264=true rtc_use_h265=false proprietary_codecs=true ffmpeg_branding=\"Chrome\" rtc_enable_symbol_export=false is_clang=true use_lld=true use_custom_libcxx=false symbol_level=0 treat_warnings_as_errors=false use_remoteexec=false"
+}
