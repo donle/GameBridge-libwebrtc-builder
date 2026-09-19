@@ -110,12 +110,23 @@ executable("rtc_bridge_bench") {
   ]
 }
 
+executable("rtc_bench_diagnostics_tests") {
+  sources = [ "tests/bench_diagnostics_tests.cpp" ]
+  configs -= [ "//build/config/compiler:no_exceptions" ]
+  configs += [
+    "//build/config/compiler:exceptions",
+    ":bridge_config",
+  ]
+  libs = [ "psapi.lib" ]
+}
+
 group("all") {
   deps = [
     ":gamebridge_rtc",
     ":gamebridge_rtc_bench",
     ":gamebridge_rtc_probe",
     ":rtc_abi_tests",
+    ":rtc_bench_diagnostics_tests",
     ":rtc_bridge_bench",
     ":rtc_connection_diagnostics_tests",
     ":rtc_injector_cold_start_tests",

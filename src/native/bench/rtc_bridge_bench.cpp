@@ -4,6 +4,7 @@
 #include "gamebridge_rtc.h"
 #include "pacing.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -130,6 +131,16 @@ struct Api {
 #undef LOAD
   }
 };
+enum class FatalReason : unsigned {
+  Header,
+  Timestamp,
+  Range,
+  Duplicate,
+  Payload,
+  Bridge,
+  Other
+};
+enum class Phase : unsigned { Setup, Prewarm, Measurement, Drain, Teardown };
 struct Context {
   struct Signal {
     uint32_t type;
@@ -140,8 +151,21 @@ struct Context {
   const std::vector<Frame> *frames{};
   std::vector<uint8_t> seen;
   std::atomic<uint64_t> delivered{}, bytes{}, fatal{}, stale{};
+  std::array<std::atomic<uint64_t>, 7> fatal_reason{};
+  std::array<std::atomic<uint64_t>, 5> fatal_phase{};
+  // Fixed codes only: control closed, pointer closed, connection failed, other.
+  std::array<std::atomic<uint64_t>, 4> bridge_error_reason{};
+  std::atomic<uint64_t> bridge_error_code_mask{};
+  std::atomic<uint64_t> payload_size_errors{}, payload_content_errors{},
+      payload_matches_other_fixture{};
+  std::atomic<unsigned> phase{static_cast<unsigned>(Phase::Setup)};
   std::atomic<bool> connected{}, route{}, closed{};
   uint32_t first = 600, count{}, step = 1500;
+  void RecordFatal(FatalReason reason) noexcept {
+    ++fatal_reason[static_cast<unsigned>(reason)];
+    ++fatal_phase[phase.load()];
+    ++fatal;
+  }
 };
 void __cdecl callback(void *pointer, uint32_t type, const uint8_t *data,
                       uint32_t size) noexcept {
@@ -152,7 +176,32 @@ void __cdecl callback(void *pointer, uint32_t type, const uint8_t *data,
       return;
     }
     if (type == GB_RTC_EVENT_ERROR) {
-      ++c.fatal;
+      const std::string_view text(
+          data ? reinterpret_cast<const char *>(data) : "", data ? size : 0);
+      const unsigned reason =
+          text == "{\"code\":\"control_channel_closed\"}"   ? 0
+          : text == "{\"code\":\"pointer_channel_closed\"}" ? 1
+          : text == "{\"code\":\"connection_failed\"}"      ? 2
+                                                            : 3;
+      ++c.bridge_error_reason[reason];
+      // Known strings never leave this boundary. Bit 10 means an unknown code;
+      // bits 0..9 identify the fixed native bridge error vocabulary below.
+      constexpr std::string_view codes[] = {
+          "{\"code\":\"control_channel_closed\"}",
+          "{\"code\":\"pointer_channel_closed\"}",
+          "{\"code\":\"connection_failed\"}",
+          "{\"code\":\"event_oversize\"}",
+          "{\"code\":\"control_overflow\"}",
+          "{\"code\":\"event_overflow\"}",
+          "{\"code\":\"description_rejected\"}",
+          "{\"code\":\"candidate_rejected\"}",
+          "{\"code\":\"channel_failed\"}",
+          "{\"code\":\"media_write_failed\"}"};
+      unsigned code = 0;
+      while (code < std::size(codes) && text != codes[code])
+        ++code;
+      c.bridge_error_code_mask.fetch_or(uint64_t{1} << code);
+      c.RecordFatal(FatalReason::Bridge);
       return;
     }
     if (type == GB_RTC_EVENT_STATE) {
@@ -170,7 +219,7 @@ void __cdecl callback(void *pointer, uint32_t type, const uint8_t *data,
     if (type == GB_RTC_EVENT_DESCRIPTION || type == GB_RTC_EVENT_CANDIDATE) {
       std::lock_guard lock(c.mutex);
       if (c.pending.size() >= 256) {
-        ++c.fatal;
+        c.RecordFatal(FatalReason::Other);
         return;
       }
       c.pending.push_back({type, {data, data + size}});
@@ -178,34 +227,51 @@ void __cdecl callback(void *pointer, uint32_t type, const uint8_t *data,
     }
     if (type != GB_RTC_EVENT_VIDEO)
       return;
-    if (size < 16) {
-      ++c.fatal;
+    if (!data || size < 16) {
+      c.RecordFatal(FatalReason::Header);
       return;
     }
     gb_rtc_media_event h{};
     std::memcpy(&h, data, 16);
-    if (h.size != 16 || h.abi_version != 1 || h.data_size != size - 16 ||
-        h.timestamp % c.step) {
-      ++c.fatal;
+    if (h.size != 16 || h.abi_version != 1) {
+      c.RecordFatal(FatalReason::Header);
+      return;
+    }
+    if (h.data_size != size - 16) {
+      c.RecordFatal(FatalReason::Range);
+      return;
+    }
+    if (!c.step || h.timestamp % c.step) {
+      c.RecordFatal(FatalReason::Timestamp);
       return;
     }
     const auto index = h.timestamp / c.step;
     const auto &expected = (*c.frames)[index % c.frames->size()];
-    if (h.data_size != expected.data.size() ||
-        hash(data + 16, h.data_size) != expected.digest) {
-      ++c.fatal;
+    const auto digest = hash(data + 16, h.data_size);
+    if (h.data_size != expected.data.size() || digest != expected.digest) {
+      if (h.data_size != expected.data.size())
+        ++c.payload_size_errors;
+      else
+        ++c.payload_content_errors;
+      for (const auto &frame : *c.frames) {
+        if (h.data_size == frame.data.size() && digest == frame.digest) {
+          ++c.payload_matches_other_fixture;
+          break;
+        }
+      }
+      c.RecordFatal(FatalReason::Payload);
       return;
     }
     if (index < c.first || index >= c.first + c.count)
       return;
     if (c.seen[index - c.first]++) {
-      ++c.fatal;
+      c.RecordFatal(FatalReason::Duplicate);
       return;
     }
     c.bytes.fetch_add(h.data_size);
     ++c.delivered;
   } catch (...) {
-    ++c.fatal;
+    c.RecordFatal(FatalReason::Other);
   }
 }
 struct Peers {
@@ -302,6 +368,8 @@ int run(int argc, char **argv) {
     c.seen.resize(count);
   }
   connect(peers);
+  for (auto &c : peers.context)
+    c.phase = static_cast<unsigned>(Phase::Prewarm);
   LARGE_INTEGER frequency{};
   QueryPerformanceFrequency(&frequency);
   Timer timer(frequency.QuadPart);
@@ -328,7 +396,7 @@ int run(int argc, char **argv) {
       } else {
         ++submissionFailures;
         if (result != GB_RTC_BACKPRESSURE)
-          ++peers.context[0].fatal;
+          peers.context[0].RecordFatal(FatalReason::Other);
       }
     } else
       require(result == GB_RTC_OK, "prewarm_submit");
@@ -346,6 +414,8 @@ int run(int argc, char **argv) {
   const auto start = qpc();
   auto nextSample = start + frequency.QuadPart;
   uint32_t progress = 0;
+  for (auto &c : peers.context)
+    c.phase = static_cast<unsigned>(Phase::Measurement);
   std::fprintf(
       stderr,
       "RTC recording started: duration=%lu seconds, prewarm=10 seconds\n",
@@ -353,7 +423,7 @@ int run(int argc, char **argv) {
   for (uint32_t i = 0; i < count; ++i) {
     timer.until(gamebridge::bench::SubmissionDeadline(
         start + static_cast<int64_t>(i) * frequency.QuadPart / 60,
-        i ? stamps[i-1] : 0, frequency.QuadPart));
+        i ? stamps[i - 1] : 0, frequency.QuadPart));
     send(600 + i, true);
     if (qpc() >= nextSample) {
       peak = std::max(peak, memory(true));
@@ -373,6 +443,8 @@ int run(int argc, char **argv) {
   const double elapsed = static_cast<double>(qpc() - start) /
                          static_cast<double>(frequency.QuadPart);
   const auto drain = Clock::now() + std::chrono::seconds(2);
+  for (auto &c : peers.context)
+    c.phase = static_cast<unsigned>(Phase::Drain);
   while (peers.context[1].delivered < submitted && Clock::now() < drain)
     Sleep(1);
   const auto ending = memory();
@@ -381,6 +453,11 @@ int run(int argc, char **argv) {
   const auto length =
       api.end(metrics.data(), static_cast<uint32_t>(metrics.size()));
   require(length > 2, "measurement_end");
+  // This is an observation boundary, not permission to ignore errors. All
+  // teardown errors still count toward fatal=0 until an upstream cause is
+  // proven.
+  for (auto &c : peers.context)
+    c.phase = static_cast<unsigned>(Phase::Teardown);
   for (unsigned i = 0; i < 2; ++i) {
     api.close(peers.handles[i]);
     peers.context[i].closed = true;
@@ -402,14 +479,46 @@ int run(int argc, char **argv) {
   require(bool(out), "report_open");
   out << std::setprecision(12);
   out.write(reinterpret_cast<const char *>(metrics.data()), length - 1);
+  constexpr const char *reasons[] = {"header",    "timestamp", "range",
+                                     "duplicate", "payload",   "bridge",
+                                     "other"};
+  constexpr const char *phases[] = {"setup", "prewarm", "measurement", "drain",
+                                    "teardown"};
+  constexpr const char *bridgeReasons[] = {"control_closed", "pointer_closed",
+                                           "connection", "other"};
+  for (unsigned i = 0; i < std::size(reasons); ++i)
+    out << ",\"fatal_" << reasons[i] << "_errors\":"
+        << peers.context[0].fatal_reason[i] + peers.context[1].fatal_reason[i];
+  for (unsigned i = 0; i < std::size(phases); ++i)
+    out << ",\"fatal_" << phases[i] << "_errors\":"
+        << peers.context[0].fatal_phase[i] + peers.context[1].fatal_phase[i];
+  for (unsigned i = 0; i < std::size(bridgeReasons); ++i)
+    out << ",\"fatal_bridge_" << bridgeReasons[i] << "_errors\":"
+        << peers.context[0].bridge_error_reason[i] +
+               peers.context[1].bridge_error_reason[i];
+  out << ",\"bridge_error_code_mask\":"
+      << (peers.context[0].bridge_error_code_mask.load() |
+          peers.context[1].bridge_error_code_mask.load())
+      << ",\"payload_size_errors\":"
+      << peers.context[0].payload_size_errors +
+             peers.context[1].payload_size_errors
+      << ",\"payload_content_errors\":"
+      << peers.context[0].payload_content_errors +
+             peers.context[1].payload_content_errors
+      << ",\"payload_matches_other_fixture\":"
+      << peers.context[0].payload_matches_other_fixture +
+             peers.context[1].payload_matches_other_fixture;
   const auto delivered = peers.context[1].delivered.load();
   uint64_t lateFrames = 0, burstIntervals = 0;
   int64_t maximumLateness = 0;
   for (uint32_t i = 0; i < count; ++i) {
-    const auto late = stamps[i] - (start + static_cast<int64_t>(i) * frequency.QuadPart / 60);
+    const auto late =
+        stamps[i] - (start + static_cast<int64_t>(i) * frequency.QuadPart / 60);
     maximumLateness = std::max(maximumLateness, late);
-    if (late > frequency.QuadPart / 60) ++lateFrames;
-    if (i && stamps[i] - stamps[i-1] < frequency.QuadPart / 1000) ++burstIntervals;
+    if (late > frequency.QuadPart / 60)
+      ++lateFrames;
+    if (i && stamps[i] - stamps[i - 1] < frequency.QuadPart / 1000)
+      ++burstIntervals;
   }
   const auto fatal = peers.context[0].fatal + peers.context[1].fatal;
   const auto stale = peers.context[0].stale + peers.context[1].stale;
@@ -433,7 +542,8 @@ int run(int argc, char **argv) {
       << ",\"stale_handle_callbacks\":" << stale
       << ",\"producer_late_frames\":" << lateFrames
       << ",\"producer_bursts_under_1ms\":" << burstIntervals
-      << ",\"producer_max_lateness_ms\":" << static_cast<double>(maximumLateness)*1000/frequency.QuadPart
+      << ",\"producer_max_lateness_ms\":"
+      << static_cast<double>(maximumLateness) * 1000 / frequency.QuadPart
       << ",\"producer_catchup_minimum_interval_ms\":2"
       << ",\"width\":1920,\"height\":1080,\"fps\":60,\"route\":\"direct\","
          "\"transport\":\"C ABI/RTC/DTLS-SRTP/UDP/C "

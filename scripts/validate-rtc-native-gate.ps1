@@ -7,12 +7,12 @@ function Test-NativeRtcGate {
     param([Parameter(Mandatory)]$Report, [Parameter(Mandatory)][int]$DurationSeconds)
     $minimum = Get-NativeRtcMinimumFrames $DurationSeconds
     $ranges = [ordered]@{
+        fatal_errors=@(0,0); stale_handle_callbacks=@(0,0); metrics_errors=@(0,0)
         duration_seconds=@($DurationSeconds, ($DurationSeconds + 5))
         frames_delivered=@($minimum, ($DurationSeconds * 60))
         frames_submitted=@($minimum, ($DurationSeconds * 60))
         bridge_latency_samples=@($minimum, ($DurationSeconds * 60))
         bridge_p95_ms=@(0,2); video_queue_depth_max=@(1,1); memory_growth_mib=@(0,64)
-        fatal_errors=@(0,0); stale_handle_callbacks=@(0,0); metrics_errors=@(0,0)
         throughput_bps=@(23750000,26250000); gc_pause_ms_max=@(0,0); gc_cycles=@(0,0)
         frames_dropped_bridge=@(0,($DurationSeconds*60)); frames_dropped_receiver=@(0,($DurationSeconds*60))
         submission_failures=@(0,($DurationSeconds*60))
@@ -44,6 +44,10 @@ function ConvertTo-NativeRtcDiagnostic {
         'frames_delivered','throughput_bps','submitted_bps','bridge_p95_ms','bridge_latency_samples','video_queue_depth_max',
         'memory_growth_mib','memory_ending_growth_mib','native_memory_baseline_bytes','native_memory_peak_bytes','native_memory_ending_bytes',
         'fatal_errors','stale_handle_callbacks','metrics_errors','gc_pause_ms_max','gc_cycles','frames_dropped_bridge','frames_dropped_receiver',
+        'fatal_header_errors','fatal_timestamp_errors','fatal_range_errors','fatal_duplicate_errors','fatal_payload_errors','fatal_bridge_errors','fatal_other_errors',
+        'fatal_setup_errors','fatal_prewarm_errors','fatal_measurement_errors','fatal_drain_errors','fatal_teardown_errors',
+        'fatal_bridge_control_closed_errors','fatal_bridge_pointer_closed_errors','fatal_bridge_connection_errors','fatal_bridge_other_errors',
+        'payload_size_errors','payload_content_errors','payload_matches_other_fixture','bridge_error_code_mask',
         'producer_late_frames','producer_bursts_under_1ms','producer_max_lateness_ms','producer_catchup_minimum_interval_ms',
         'width','height','fps','consumer_exit_code')
     $safe=[ordered]@{report_schema_version=2;passed=$false;diagnostic_stage=$Stage;requested_duration_seconds=$DurationSeconds;frames_expected_min=(Get-NativeRtcMinimumFrames $DurationSeconds)}

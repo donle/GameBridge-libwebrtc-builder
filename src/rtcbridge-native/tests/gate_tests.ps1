@@ -35,6 +35,13 @@ Test-NativeRtcGate ([pscustomobject]$full) 1800 | Out-Null
 $changed=$valid.Clone();$changed.frames_delivered=294
 try { Test-NativeRtcGate ([pscustomobject]$changed) 5; throw 'Expected frame rejection' }
 catch { if($_.Exception.Message -notmatch 'frames_delivered.*actual=294.*minimum=295.*maximum=300'){throw 'Gate failure must report the actual value and unchanged bounds'} }
+# An error must not be hidden by whichever hashtable key happens to enumerate
+# first. Reproduce the failed hosted shape plus a simultaneous frame failure.
+for($iteration=0;$iteration -lt 100;$iteration++) {
+    $changed=$valid.Clone();$changed.frames_delivered=294;$changed.fatal_errors=2
+    try { Test-NativeRtcGate ([pscustomobject]$changed) 5; throw 'Expected fatal rejection' }
+    catch { if($_.Exception.Message -notmatch 'fatal_errors.*actual=2.*minimum=0.*maximum=0'){throw 'Fatal validation must deterministically precede throughput/frame thresholds'} }
+}
 $successful=$valid.Clone();$successful.passed=$true
 $projected=ConvertTo-NativeRtcDiagnostic ([pscustomobject]$successful) 5 'complete'
 if(!$projected.passed){throw 'Validated success lost its verdict'}

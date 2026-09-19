@@ -10,6 +10,11 @@ add_executable(rtc_connection_diagnostics_tests tests/connection_diagnostics_tes
 target_compile_features(rtc_connection_diagnostics_tests PRIVATE cxx_std_20)
 target_include_directories(rtc_connection_diagnostics_tests PRIVATE ../native/tests include)
 add_test(NAME rtc_connection_diagnostics COMMAND rtc_connection_diagnostics_tests)
+add_executable(rtc_bench_diagnostics_tests tests/bench_diagnostics_tests.cpp)
+target_compile_features(rtc_bench_diagnostics_tests PRIVATE cxx_std_20)
+target_include_directories(rtc_bench_diagnostics_tests PRIVATE ../rtcbridge/include)
+target_link_libraries(rtc_bench_diagnostics_tests PRIVATE psapi)
+add_test(NAME rtc_bench_diagnostics COMMAND rtc_bench_diagnostics_tests)
 set(RTC_WEBRTC_SOURCE "" CACHE PATH "Exact pinned libwebrtc checkout for cold-start regression")
 if(RTC_WEBRTC_SOURCE)
   add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/runtime_network_prefix.h"

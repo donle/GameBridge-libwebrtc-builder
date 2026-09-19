@@ -41,6 +41,20 @@ try {
     if($incomplete.passed -ne $false -or $incomplete.frames_expected_min -ne 107900){throw 'Incomplete stage retained PASS or changed the full gate'}
     $consumerFailed=ConvertTo-NativeRtcDiagnostic ([pscustomobject]@{passed=$true;consumer_exit_code=1}) 5 'consumer'
     if($consumerFailed.passed -ne $false -or $consumerFailed.consumer_exit_code -ne 1){throw 'Consumer failure became a pass'}
+    $fatalFields=@('fatal_header_errors','fatal_timestamp_errors','fatal_range_errors','fatal_duplicate_errors','fatal_payload_errors','fatal_bridge_errors','fatal_other_errors',
+        'fatal_setup_errors','fatal_prewarm_errors','fatal_measurement_errors','fatal_drain_errors','fatal_teardown_errors',
+        'fatal_bridge_control_closed_errors','fatal_bridge_pointer_closed_errors','fatal_bridge_connection_errors','fatal_bridge_other_errors',
+        'payload_size_errors','payload_content_errors','payload_matches_other_fixture','bridge_error_code_mask')
+    $reasons=@{passed=$false;fatal_errors=2}
+    foreach($name in $fatalFields){$reasons[$name]=2}
+    $reasonReport=ConvertTo-NativeRtcDiagnostic ([pscustomobject]$reasons) 5 'consumer'
+    foreach($name in $fatalFields){
+        $property=$reasonReport.PSObject.Properties[$name]
+        if($null -eq $property -or $property.Value -ne 2){throw "Safe fatal diagnostic omitted: $name"}
+        $private=$reasons.Clone();$private[$name]='PRIVATE_SENTINEL'
+        $sanitized=ConvertTo-NativeRtcDiagnostic ([pscustomobject]$private) 5 'consumer' | ConvertTo-Json -Depth 10
+        if($sanitized.Contains('PRIVATE_SENTINEL')){throw 'Opaque fatal detail leaked'}
+    }
 
     $launcher=Get-Content -Raw -LiteralPath "$repository/scripts/test-rtc-native-gate.ps1"
     if($launcher -notmatch '& \$consumer \$DurationSeconds \$fixture \$dll \$rawResultPath' -or $launcher -match '& \$consumer .* \$resultPath'){throw 'Raw consumer output overlaps the published sanitized report'}

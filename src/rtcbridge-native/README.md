@@ -94,6 +94,20 @@ Build and artifact flow:
    are never uploaded. A diagnostics artifact is not a passing build or signed
    release. Five-second and 1800-second thresholds remain unchanged; there is
    no automatic retry or timing-based waiver.
+   Consumer fatal counters are partitioned by reason (header, timestamp,
+   declared payload byte range, duplicate, payload, bridge error, other) and
+   callback-observation phase (setup, prewarm, measurement, drain, teardown).
+   Both partitions sum to `fatal_errors`; teardown is diagnostic, not an error
+   exemption. The context is still marked closed only after close returns.
+   Payload diagnostics distinguish size/content mismatch and bytes matching a
+   different fixture frame, without logging any payload. Fixed bridge error
+   counts distinguish the two channel closures, connection failure and other.
+   `bridge_error_code_mask` further uses bits 0..9 for, in order:
+   `control_channel_closed`, `pointer_channel_closed`, `connection_failed`,
+   `event_oversize`, `control_overflow`, `event_overflow`, `description_rejected`,
+   `candidate_rejected`, `channel_failed`, `media_write_failed`; bit 10 is unknown.
+   Fatal/stale/metrics errors are checked first in deterministic validation
+   order, with all original zero-error and performance bounds retained.
    Both initial and final public reports use same-directory staged writes,
    flush-to-disk and close before an atomic replacement. Existing reports use
    `File.Replace` (PowerShell `Move-Item -Force` has a delete window); first
