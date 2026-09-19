@@ -32,8 +32,21 @@ jobs:
         run: ./src/rtcbridge-native/tests/ci_depot_environment_tests.ps1
       - name: Validate required license package contents
         run: ./src/rtcbridge-native/tests/license_package_tests.ps1
+      - name: Validate gate failures and sanitized diagnostics
+        run: |
+          ./src/rtcbridge-native/tests/gate_tests.ps1
+          ./src/rtcbridge-native/tests/gate_diagnostic_tests.ps1
+          ./src/rtcbridge-native/tests/gate_atomic_tests.ps1
       - name: Build and test only on ephemeral hosted Windows
         run: ./scripts/build-libwebrtc-ci.ps1
+      - name: Preserve sanitized native gate diagnostics on success or failure
+        if: ${{ always() && hashFiles('out/rtc-short-gate.json') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-rtc-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/rtc-short-gate.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Attest the exact archive after ABI and five-second gate pass
         uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45
         with:

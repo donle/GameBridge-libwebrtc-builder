@@ -15,6 +15,8 @@ $valid = @{
     frames_dropped_bridge=0; frames_dropped_receiver=0; submission_failures=0
 }
 Test-NativeRtcGate ([pscustomobject]$valid) 5 | Out-Null
+$boundary=$valid.Clone();$boundary.frames_delivered=295
+Test-NativeRtcGate ([pscustomobject]$boundary) 5 | Out-Null
 foreach ($case in @(@('frames_delivered',294),@('bridge_p95_ms',2.01),@('memory_growth_mib',65),
     @('video_queue_depth_max',2),@('fatal_errors',1),@('throughput_bps',22000000),
     @('rtc_backend','pion'),@('gc_applicable',$true),@('metrics_errors',1),
@@ -30,4 +32,11 @@ $full=$valid.Clone();$full.duration_seconds=1800;$full.frames_submitted=108000;$
 Expect-Failure { Test-NativeRtcGate ([pscustomobject]$full) 1800 }
 $full.frames_delivered=107900
 Test-NativeRtcGate ([pscustomobject]$full) 1800 | Out-Null
+$changed=$valid.Clone();$changed.frames_delivered=294
+try { Test-NativeRtcGate ([pscustomobject]$changed) 5; throw 'Expected frame rejection' }
+catch { if($_.Exception.Message -notmatch 'frames_delivered.*actual=294.*minimum=295.*maximum=300'){throw 'Gate failure must report the actual value and unchanged bounds'} }
+$successful=$valid.Clone();$successful.passed=$true
+$projected=ConvertTo-NativeRtcDiagnostic ([pscustomobject]$successful) 5 'complete'
+if(!$projected.passed){throw 'Validated success lost its verdict'}
+Test-NativeRtcGate $projected 5 | Out-Null
 Write-Host 'native gate validator: threshold, missing metric, backend, NaN, full-duration boundary PASS'

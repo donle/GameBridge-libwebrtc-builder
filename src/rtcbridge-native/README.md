@@ -87,6 +87,19 @@ Build and artifact flow:
    The workflow runs core,
    production and probe ABI tests, then the real five-second media gate. Only
    success produces the SHA-256 archive and GitHub provenance attestation.
+   Every gate attempt logs and retains the complete allowlisted numeric report,
+   including histogram, producer timing and drop accounting even on failure.
+   CI uploads only that sanitized JSON under a separate diagnostics artifact;
+   raw consumer output, SDP, candidate addresses and arbitrary error strings
+   are never uploaded. A diagnostics artifact is not a passing build or signed
+   release. Five-second and 1800-second thresholds remain unchanged; there is
+   no automatic retry or timing-based waiver.
+   Both initial and final public reports use same-directory staged writes,
+   flush-to-disk and close before an atomic replacement. Existing reports use
+   `File.Replace` (PowerShell `Move-Item -Force` has a delete window); first
+   publication uses a non-overwriting `Move-Item`. A failed or killed writer
+   leaves the preceding valid report intact, and temporary/raw files are not
+   upload inputs.
    The cold-start regression compiles the actual pinned injector method bodies
    with isolated engine dependencies; actual ABI CI also waits for one video
    frame before making any further media/data call.
