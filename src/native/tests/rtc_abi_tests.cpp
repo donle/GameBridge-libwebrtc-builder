@@ -2,6 +2,7 @@
 #include <windows.h>
 #include "gamebridge_rtc.h"
 #include "rtc_media_fixture.h"
+#include "rtc_connection_diagnostics.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
@@ -99,19 +100,43 @@ void __cdecl peer_callback(void* context, uint32_t type, const uint8_t* bytes, u
 int connect_native_peers(Api& api, const gb_rtc_config& config) {
   PeerEvents events[2];
   gb_rtc_handle peers[2]{};
+  RtcConnectionDiagnostics trace;
+  struct Lifetime {
+    Api& api;
+    gb_rtc_handle (&peers)[2];
+    PeerEvents (&events)[2];
+    RtcConnectionDiagnostics& trace;
+    void Close() {
+      for (auto& peer : peers) if (peer) { api.close(peer); peer = 0; }
+    }
+    ~Lifetime() {
+      if (trace.phase != RtcConnectionDiagnostics::Complete) {
+        for (unsigned i = 0; i < 2; ++i) {
+          trace.Print(i);
+          std::lock_guard lock(events[i].mutex);
+          std::fprintf(stderr, "rtc_connect peer=%u callbacks=%u pending=%zu\n", i,
+                       events[i].callbacks.load(), events[i].pending.size());
+        }
+      }
+      // Every failure path retires callbacks before their context is destroyed.
+      Close();
+    }
+  } lifetime{api, peers, events, trace};
   CHECK(api.create(&config, peer_callback, &events[0], &peers[0]) == GB_RTC_OK);
   CHECK(api.create(&config, peer_callback, &events[1], &peers[1]) == GB_RTC_OK);
   CHECK(api.answer(peers[1]) == GB_RTC_STATE);
   CHECK(api.offer(peers[0]) == GB_RTC_OK);
-  bool connected[2]{}, routed[2]{}, gathered[2]{};
+  bool connected[2]{}, routed[2]{}, gathered[2]{}, end_forwarded[2]{};
   const auto deadline = GetTickCount64() + 5000;
-  while (!(connected[0] && connected[1] && routed[0] && routed[1] && gathered[0] && gathered[1])) {
+  while (!(connected[0] && connected[1] && routed[0] && routed[1] && gathered[0] && gathered[1] && end_forwarded[0] && end_forwarded[1])) {
     CHECK(GetTickCount64() < deadline);
     for (unsigned source = 0; source < 2; ++source) {
       std::vector<PeerEvents::Payload> pending;
       { std::lock_guard lock(events[source].mutex); pending.swap(events[source].pending); }
       for (const auto& event : pending) {
         const std::string value(event.bytes.begin(), event.bytes.end());
+        trace.Event(source, event.type, value);
+        if (event.type <= GB_RTC_EVENT_GATHERING) trace.Print(source);
         CHECK(event.type != GB_RTC_EVENT_ERROR);
         if (event.type == GB_RTC_EVENT_STATE && value == "{\"state\":3}") connected[source] = true;
         if (event.type == GB_RTC_EVENT_ROUTE) { CHECK(value == "{\"route\":1}"); routed[source] = true; }
@@ -121,15 +146,27 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
         CHECK(input); std::memcpy(input, event.bytes.data(), event.bytes.size());
         const auto call = event.type == GB_RTC_EVENT_DESCRIPTION ? api.remote : api.candidate;
         gb_rtc_result result;
-        do { result = call(peers[1-source], input, static_cast<uint32_t>(event.bytes.size())); if (result == GB_RTC_BACKPRESSURE) Sleep(1); } while (result == GB_RTC_BACKPRESSURE && GetTickCount64() < deadline);
+        do {
+          result = call(peers[1-source], input, static_cast<uint32_t>(event.bytes.size()));
+          trace.Operation(1-source, event.type == GB_RTC_EVENT_DESCRIPTION ? RtcConnectionDiagnostics::Remote : RtcConnectionDiagnostics::Candidate, result);
+          if (result == GB_RTC_BACKPRESSURE) Sleep(1);
+        } while (result == GB_RTC_BACKPRESSURE && GetTickCount64() < deadline);
         std::memset(input, 0xff, event.bytes.size()); CHECK(VirtualFree(input, 0, MEM_RELEASE));
         CHECK(result == GB_RTC_OK);
-        if (event.type == GB_RTC_EVENT_DESCRIPTION && source == 0) CHECK(api.answer(peers[1]) == GB_RTC_OK);
+        if (event.type == GB_RTC_EVENT_CANDIDATE && trace.peers[source].candidate_end)
+          end_forwarded[source] = true;
+        if (event.type == GB_RTC_EVENT_DESCRIPTION && source == 0) {
+          const auto answer = api.answer(peers[1]);
+          trace.Operation(1, RtcConnectionDiagnostics::Answer, answer);
+          CHECK(answer == GB_RTC_OK);
+        }
       }
     }
     Sleep(1);
   }
   const auto videoBytes = RtcMediaFixture();
+  trace.phase = RtcConnectionDiagnostics::FirstVideo;
+  trace.Print(0); trace.Print(1);
   const uint8_t audioBytes[]{0xf8,0xff,0xfe}, controlBytes[]{1,2,3,4}, pointerBytes[]{4,3,2,1};
   // Free the caller's allocation as soon as each ABI submission returns.
   auto* borrowed=static_cast<uint8_t*>(VirtualAlloc(nullptr,videoBytes.size(),MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
@@ -147,6 +184,7 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
     std::vector<PeerEvents::Payload> pending;
     {std::lock_guard lock(events[1].mutex);pending.swap(events[1].pending);}
     for(const auto& event:pending) {
+      trace.Event(1, event.type, std::string_view(event.bytes.empty() ? "" : reinterpret_cast<const char*>(event.bytes.data()), event.bytes.size()));
       CHECK(event.type!=GB_RTC_EVENT_ERROR);
       if(event.type!=GB_RTC_EVENT_VIDEO)continue;
       ++videoCount;
@@ -158,6 +196,7 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
     Sleep(1);
   }
   gb_rtc_audio audio{sizeof(audio),GB_RTC_ABI_VERSION,audioBytes,sizeof(audioBytes),480,{}};
+  trace.phase = RtcConnectionDiagnostics::MediaData;
   CHECK(api.audio(peers[0],&audio)==GB_RTC_OK);
   for (uint32_t kind : {GB_RTC_CHANNEL_RELIABLE,GB_RTC_CHANNEL_POINTER}) {
     gb_rtc_result result; const auto* bytes=kind==GB_RTC_CHANNEL_RELIABLE?controlBytes:pointerBytes;
@@ -170,6 +209,7 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
     std::vector<PeerEvents::Payload> pending;
     {std::lock_guard lock(events[1].mutex);pending.swap(events[1].pending);}
     for(const auto& event:pending) {
+      trace.Event(1, event.type, std::string_view(event.bytes.empty() ? "" : reinterpret_cast<const char*>(event.bytes.data()), event.bytes.size()));
       CHECK(event.type!=GB_RTC_EVENT_ERROR);
       if(event.type==GB_RTC_EVENT_VIDEO||event.type==GB_RTC_EVENT_AUDIO) {
         CHECK(event.bytes.size()>=sizeof(gb_rtc_media_event));gb_rtc_media_event header{};std::memcpy(&header,event.bytes.data(),sizeof(header));
@@ -181,11 +221,12 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
     }
     Sleep(1);
   }
-  api.close(peers[0]);
-  api.close(peers[1]);
+  trace.phase = RtcConnectionDiagnostics::Closing;
+  lifetime.Close();
   const auto first = events[0].callbacks.load(), second = events[1].callbacks.load();
   Sleep(10);
   CHECK(events[0].callbacks == first && events[1].callbacks == second);
+  trace.phase = RtcConnectionDiagnostics::Complete;
   return 0;
 }
 

@@ -19,6 +19,7 @@
 #include "json.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
+#include "rtc_base/win32_socket_init.h"
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -38,6 +39,9 @@ HandleTable<Session> sessions;
 // Process-lived because DLL unloading while upstream worker threads exist is
 // unsupported. No system audio device is ever opened: encoded Opus is injected.
 struct Runtime {
+  // Windows requires this before CreateWithSocketServer, not merely before
+  // the first SDP exchange. Keep it alive as long as every upstream thread.
+  w::WinsockInitializer winsock;
   std::unique_ptr<w::Thread> network = w::Thread::CreateWithSocketServer();
   std::unique_ptr<w::Thread> worker = w::Thread::Create();
   std::unique_ptr<w::Thread> signaling = w::Thread::Create();
@@ -45,8 +49,8 @@ struct Runtime {
   Runtime() {
     w::LogMessage::LogToDebug(w::LS_NONE);
     w::LogMessage::SetLogToStderr(false);
-    if (!w::InitializeSSL() || !network->Start() || !worker->Start() ||
-        !signaling->Start())
+    if (winsock.error() != 0 || !w::InitializeSSL() || !network->Start() ||
+        !worker->Start() || !signaling->Start())
       throw std::runtime_error("rtc_init");
     auto environment = w::CreateEnvironment();
     auto audio = w::CreateAudioDeviceModule(environment,
@@ -472,6 +476,9 @@ public:
             return GB_RTC_OK;
           }
           if (!candidate)
+            // The pinned upstream rejects null candidates (crbug.com/935898).
+            // ABI end-of-generation is accepted after prior FIFO candidates;
+            // it is not forwarded as an invalid upstream AddIceCandidate.
             return GB_RTC_OK;
           if (!pc_ || !pc_->AddIceCandidate(candidate.get()))
             return GB_RTC_INVALID;

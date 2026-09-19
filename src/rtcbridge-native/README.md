@@ -31,6 +31,14 @@ waits for borrowed callbacks; callback-originated close across any sessions
 does not block. Unused sessions do not instantiate a PeerConnection, preserving
 cheap create/close and stale-handle tests. Libwebrtc worker threads/factory live
 for the process lifetime, so unloading the DLL while the process runs is unsupported.
+The pinned Windows `WinsockInitializer` is the runtime's first member, before
+socket-server construction. SSL initializes before any thread starts or factory
+is created; neither global SSL nor Winsock is torn down while peers can exist.
+The ABI test reports only fixed state enums, event/operation counts and result
+codes, never SDP, candidate addresses, credentials or opaque error strings. It
+forwards both end-of-gathering markers after preceding candidates and retains
+the five-second deadline. Empty candidate markers are accepted locally because
+the pinned upstream explicitly rejects a null `AddIceCandidate`.
 
 Build and artifact flow:
 
@@ -67,6 +75,9 @@ Build and artifact flow:
    avoiding PowerShell property expansion and batch-wrapper quote processing.
    Before the full graph, a regression runs the actual production GN block on
    a tiny SDK-free graph with the synchronized GN binary and checks every value.
+   Focused Winsock/core/injector/diagnostic tests run first; production ABI runs
+   before the remaining probe/benchmark variants are built. No build cache is
+   used, and attestation still requires every ABI/media gate to pass.
    The workflow runs core,
    production and probe ABI tests, then the real five-second media gate. Only
    success produces the SHA-256 archive and GitHub provenance attestation.
