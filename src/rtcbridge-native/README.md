@@ -63,6 +63,10 @@ Build and artifact flow:
    (Python 3.11), rather than vpython's default interpreter. An existing isolated
    Git configuration inside the build directory disables bootstrap global
    configuration changes; the runner user's Git configuration is not modified.
+   GN reads the unchanged pinned build arguments directly from UTF-8 `args.gn`,
+   avoiding PowerShell property expansion and batch-wrapper quote processing.
+   Before the full graph, a regression runs the actual production GN block on
+   a tiny SDK-free graph with the synchronized GN binary and checks every value.
    The workflow runs core,
    production and probe ABI tests, then the real five-second media gate. Only
    success produces the SHA-256 archive and GitHub provenance attestation.

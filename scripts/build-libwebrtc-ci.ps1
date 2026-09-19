@@ -139,9 +139,15 @@ try {
         }
     }
     & "$bridgeRoot/rtcbridge-native/tests/prepare_injector_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/pinned_injector_methods.h')
+    & "$repository/src/rtcbridge-native/tests/ci_gn_tests.ps1" -GnExecutable (Join-Path $sourceRoot 'src/buildtools/win/gn.exe')
     Push-Location src
     try {
-        gn gen out/Release --root-target=//gamebridge/rtcbridge-native:all --args=$pins.gn_args
+        # Keep the pinned GN language text out of PowerShell argument expansion
+        # and gn.bat's quote processing. GN reads args.gn from its output folder.
+        $gnOutput=Join-Path (Get-Location).Path 'out/Release'
+        New-Item -ItemType Directory -Path $gnOutput -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $gnOutput 'args.gn'),([string]$pins.gn_args+"`n"),[Text.UTF8Encoding]::new($false))
+        gn gen out/Release --root-target=//gamebridge/rtcbridge-native:all
         Check-Exit 'GN generation'
         autoninja -C out/Release gamebridge/rtcbridge-native:all -j 4
         Check-Exit 'Native bridge build'
