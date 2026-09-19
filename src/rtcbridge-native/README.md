@@ -78,6 +78,12 @@ Build and artifact flow:
    Focused Winsock/core/injector/diagnostic tests run first; production ABI runs
    before the remaining probe/benchmark variants are built. No build cache is
    used, and attestation still requires every ABI/media gate to pass.
+   The hash-pinned `license-root-target.patch` gives upstream license queries
+   the same reachable custom-root graph and preserves GN failure diagnostics.
+   Before compilation, upstream's real recursive scanner collects the whole
+   `:all` graph, including all binary variants, and rejects unknown libraries
+   or missing license files. Packaging requires matching complete `LICENSE.md`
+   and `THIRD_PARTY_LICENSES.md` plus `PATENTS.txt`; no license failure is ignored.
    The workflow runs core,
    production and probe ABI tests, then the real five-second media gate. Only
    success produces the SHA-256 archive and GitHub provenance attestation.

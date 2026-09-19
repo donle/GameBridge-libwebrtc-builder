@@ -125,6 +125,14 @@ try {
     Check-Exit 'Encoder-ready patch applicability'
     git -C src apply $startupPatch
     Check-Exit 'Encoder-ready patch application'
+    $licensePatch=Join-Path $repository 'src/rtcbridge-native/patches/license-root-target.patch'
+    if ((Get-FileHash -LiteralPath $licensePatch -Algorithm SHA256).Hash -ine $pins.license_root_patch_sha256) { throw 'License root-target patch hash mismatch' }
+    git -C src apply --check $licensePatch
+    Check-Exit 'License root-target patch applicability'
+    git -C src apply $licensePatch
+    Check-Exit 'License root-target patch application'
+    & "$depot/vpython3.bat" -vpython-spec "$depot/vpython.toml" -B "$repository/src/rtcbridge-native/tests/license_tests.py" --source-root (Join-Path $sourceRoot 'src') --depot-root $depot --gn (Join-Path $sourceRoot 'src/buildtools/win/gn.exe')
+    Check-Exit 'Actual GN recursive license regression'
     $bridgeRoot=Join-Path $sourceRoot 'src/gamebridge'
     New-Item -ItemType Directory -Path $bridgeRoot | Out-Null
     foreach($component in @('rtcbridge-native','rtcbridge','native')) {
@@ -150,6 +158,15 @@ try {
         [IO.File]::WriteAllText((Join-Path $gnOutput 'args.gn'),([string]$pins.gn_args+"`n"),[Text.UTF8Encoding]::new($false))
         gn gen out/Release --root-target=//gamebridge/rtcbridge-native:all
         Check-Exit 'GN generation'
+        # Generate from the real dependency graph before the expensive build.
+        # Missing/unknown licenses abort here; no partial payload is attested.
+        $package=Join-Path $repository 'out/rtc-package'
+        $payload=Join-Path $package 'payload'
+        New-Item -ItemType Directory -Path $payload -Force | Out-Null
+        vpython3 -c "import sys; sys.path.insert(0, 'tools_webrtc/libs'); import generate_licenses as g; licenses=dict(g.LIB_TO_LICENSES_DICT); licenses['openh264']=['third_party/openh264/src/LICENSE']; licenses['ffmpeg']=['third_party/ffmpeg/COPYING.LGPLv2.1']; g.LicenseBuilder(['out/Release'], ['//gamebridge/rtcbridge-native:all'], licenses).generate_license_text(sys.argv[1])" $payload
+        Check-Exit 'Third-party recursive license collection'
+        Copy-Item -LiteralPath (Join-Path $payload 'LICENSE.md') -Destination (Join-Path $payload 'THIRD_PARTY_LICENSES.md')
+        Copy-Item -LiteralPath 'PATENTS' -Destination (Join-Path $payload 'PATENTS.txt')
         # Qualify the inexpensive Windows startup and test diagnostics first.
         # Then run the production peer/ABI test before building probe/bench DLLs.
         autoninja -C out/Release gamebridge/rtcbridge-native:rtc_runtime_socket_tests gamebridge/rtcbridge-native:rtc_connection_diagnostics_tests gamebridge/rtcbridge-native:rtc_native_core_tests gamebridge/rtcbridge-native:rtc_injector_cold_start_tests -j 4
@@ -172,18 +189,6 @@ Download-Pinned $pins.ffmpeg_url $ffmpegArchive $pins.ffmpeg_sha256
 Expand-Archive -LiteralPath $ffmpegArchive -DestinationPath (Join-Path $buildRoot 'ffmpeg')
 $ffmpeg=Join-Path $buildRoot 'ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe'
 & "$PSScriptRoot/test-rtc-native-gate.ps1" -DurationSeconds 5 -ArtifactDirectory $binary -Output 'out/rtc-short-gate.json' -FFmpeg $ffmpeg
-$package=Join-Path $repository 'out/rtc-package'
-$payload=Join-Path $package 'payload'
-New-Item -ItemType Directory -Path $payload -Force | Out-Null
-Push-Location (Join-Path $sourceRoot 'src')
-try {
-    # Upstream's scanner follows the actual GN dependency graph. The pinned
-    # upstream table lacks its optional H.264 dependencies; name their licenses
-    # explicitly and retain fail-closed behavior for any other unknown library.
-    vpython3 -c "import sys; sys.path.insert(0, 'tools_webrtc/libs'); import generate_licenses as g; licenses=dict(g.LIB_TO_LICENSES_DICT); licenses['openh264']=['third_party/openh264/src/LICENSE']; licenses['ffmpeg']=['third_party/ffmpeg/COPYING.LGPLv2.1']; g.LicenseBuilder(['out/Release'], ['//gamebridge/rtcbridge-native:gamebridge_rtc'], licenses).generate_license_text(sys.argv[1])" $payload
-    Check-Exit 'Third-party license collection'
-    Copy-Item -LiteralPath 'PATENTS' -Destination (Join-Path $payload 'PATENTS.txt')
-} finally {Pop-Location}
 foreach($name in @('gamebridge_rtc.dll','gamebridge_rtc_probe.dll','gamebridge_rtc_bench.dll','rtc_abi_tests.exe','rtc_bridge_bench.exe','rtc_native_core_tests.exe')) {Copy-Item -LiteralPath (Join-Path $binary $name) -Destination $payload}
 Copy-Item -LiteralPath (Join-Path $repository 'out/rtc-short-gate.json') -Destination $payload
 $metadata=@{
@@ -191,6 +196,7 @@ $metadata=@{
     source_revision=$env:GITHUB_SHA;webrtc_revision=$pins.webrtc_revision;depot_tools_revision=$pins.depot_tools_revision
     chromium_build_revision=$pins.chromium_build_revision;gn_args=$pins.gn_args
     encoder_ready_patch_sha256=$pins.encoder_ready_patch_sha256
+    license_root_patch_sha256=$pins.license_root_patch_sha256
     runner_image=$env:ImageOS;runner_image_version=$env:ImageVersion
     visual_studio_path=$vs;sdk_installer_sha256=$pins.windows_sdk_installer_sha256
     disk_before=$before;disk_after=$after;reclaimed_paths=$reclaimed
@@ -200,6 +206,10 @@ $metadata=@{
     core_tests='passed';injector_cold_start='passed';abi_production='passed';abi_probe='passed';short_gate='passed'
 }
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payload 'native-build.json') -Encoding UTF8
+foreach($name in @('LICENSE.md','THIRD_PARTY_LICENSES.md','PATENTS.txt')) {
+    if((Get-Item -LiteralPath (Join-Path $payload $name)).Length -lt 1){throw "Required license payload is empty: $name"}
+}
+if((Get-FileHash -LiteralPath (Join-Path $payload 'LICENSE.md') -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath (Join-Path $payload 'THIRD_PARTY_LICENSES.md') -Algorithm SHA256).Hash){throw 'Third-party license payloads disagree'}
 $archive=Join-Path $package 'gamebridge-rtc-windows-x64.zip'
 Compress-Archive -Path "$payload/*" -DestinationPath $archive
 $hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()

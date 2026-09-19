@@ -1,0 +1,25 @@
+diff --git a/tools_webrtc/libs/generate_licenses.py b/tools_webrtc/libs/generate_licenses.py
+--- a/tools_webrtc/libs/generate_licenses.py
++++ b/tools_webrtc/libs/generate_licenses.py
+@@ -185,11 +185,19 @@ class LicenseBuilder:
+             '--all',
+             '--format=json',
++            '--root-target=' + target,
+             os.path.abspath(buildfile_dir),
+             target,
+         ]
+         logging.debug('Running: %r', cmd)
+-        output_json = subprocess.check_output(cmd,
+-                                              cwd=WEBRTC_ROOT).decode('UTF-8')
++        try:
++            output_json = subprocess.check_output(cmd,
++                                                  cwd=WEBRTC_ROOT).decode('UTF-8')
++        except subprocess.CalledProcessError as error:
++            # GN writes target/graph diagnostics to stdout. Preserve them when
++            # check_output raises instead of losing the actionable failure.
++            logging.error('gn desc failed (exit %d):\n%s', error.returncode,
++                          (error.output or b'').decode('UTF-8', errors='replace'))
++            raise
+         logging.debug('Output: %s', output_json)
+         return output_json
+ 
