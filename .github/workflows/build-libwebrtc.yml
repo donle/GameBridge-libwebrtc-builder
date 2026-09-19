@@ -28,6 +28,8 @@ jobs:
         run: ./src/rtcbridge-native/tests/ci_storage_tests.ps1
       - name: Validate deterministic native Git selection
         run: ./src/rtcbridge-native/tests/ci_git_tests.ps1
+      - name: Validate pinned Python launch and isolated Git configuration
+        run: ./src/rtcbridge-native/tests/ci_depot_environment_tests.ps1
       - name: Build and test only on ephemeral hosted Windows
         run: ./scripts/build-libwebrtc-ci.ps1
       - name: Attest the exact archive after ABI and five-second gate pass

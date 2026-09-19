@@ -18,3 +18,18 @@ function Resolve-RtcCiGitExecutable {
     }
     throw 'No valid Git for Windows application with the canonical Git/cmd/git.exe layout was found'
 }
+
+function Initialize-RtcCiGitConfig {
+    param([Parameter(Mandatory=$true)][string]$BuildRoot)
+    # Git's documented override isolates bootstrap configuration reads/writes
+    # without changing HOME/USERPROFILE or touching the runner user's config.
+    $root=Get-Item -LiteralPath $BuildRoot -Force
+    if(!$root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)){
+        throw 'Git configuration requires the fresh non-reparse build directory'
+    }
+    $gitConfigDirectory=Join-Path $root.FullName 'git-config'
+    New-Item -ItemType Directory -Path $gitConfigDirectory | Out-Null
+    $gitConfigPath=Join-Path $gitConfigDirectory '.gitconfig'
+    [IO.File]::WriteAllText($gitConfigPath,"[depot-tools]`n`tallowGlobalGitConfig = false`n",[Text.UTF8Encoding]::new($false))
+    $env:GIT_CONFIG_GLOBAL=$gitConfigPath
+}

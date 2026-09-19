@@ -59,6 +59,10 @@ Build and artifact flow:
    canonical `cmd/git.exe`, including when its `bin/git.exe` matched first. A real
    `Mirror.GetCachePath` subprocess preflight verifies the wrapper and exact
    `git.exe` binding before sync; `gclient root` verifies command readiness.
+   The external preflight explicitly uses depot_tools' pinned `vpython.toml`
+   (Python 3.11), rather than vpython's default interpreter. An existing isolated
+   Git configuration inside the build directory disables bootstrap global
+   configuration changes; the runner user's Git configuration is not modified.
    The workflow runs core,
    production and probe ABI tests, then the real five-second media gate. Only
    success produces the SHA-256 archive and GitHub provenance attestation.

@@ -50,6 +50,7 @@ if ($null -eq $volume) { throw "Insufficient hosted runner disk after bounded ca
 $buildRoot="$($volume.Name):\gb-rtc-ci"
 if (Test-Path -LiteralPath $buildRoot) { throw 'CI source directory unexpectedly exists' }
 New-Item -ItemType Directory -Path $buildRoot | Out-Null
+Initialize-RtcCiGitConfig -BuildRoot $buildRoot
 $env:TEMP=Join-Path $buildRoot 'temp';$env:TMP=$env:TEMP
 New-Item -ItemType Directory -Path $env:TEMP | Out-Null
 $vswhere='C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
@@ -90,7 +91,9 @@ Check-Exit 'Pinned Windows depot_tools bootstrap'
 $depotAfterBootstrap=(& $gitExe -C $depot rev-parse HEAD).Trim()
 Check-Exit 'Post-bootstrap depot_tools revision'
 if ($depotAfterBootstrap -cne $pins.depot_tools_revision) { throw 'Bootstrap changed the pinned depot_tools revision' }
-& "$depot/vpython3.bat" -B "$repository/src/rtcbridge-native/tests/depot_git_tests.py" $depot $gitExe
+# Unlike gclient.py, this script is outside depot_tools and cannot inherit its
+# Python 3.11 specification. Explicitly reuse the pinned upstream TOML/lockfile.
+& "$depot/vpython3.bat" -vpython-spec "$depot/vpython.toml" -B "$repository/src/rtcbridge-native/tests/depot_git_tests.py" $depot $gitExe
 Check-Exit 'Actual pinned Git wrapper/cache lookup preflight'
 if ((Get-PSDrive -Name $volume.Name).Free -lt ($pins.minimum_free_gib * 1GB)) { throw 'SDK provisioning left insufficient disk for pinned libwebrtc sync/build' }
 $sourceRoot=Join-Path $buildRoot 'webrtc'

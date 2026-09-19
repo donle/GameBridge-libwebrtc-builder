@@ -13,6 +13,7 @@ def main():
     expected_git = Path(sys.argv[2]).resolve(strict=True)
     if expected_git.name.lower() != "git.exe":
         raise RuntimeError("Expected a resolved native git.exe, not a batch stub")
+    print(f"depot preflight interpreter: {sys.version.split()[0]} ({sys.executable})", flush=True)
     os.environ["DEPOT_TOOLS_METRICS"] = "0"
     sys.path.insert(0, str(depot))
     import git_cache
