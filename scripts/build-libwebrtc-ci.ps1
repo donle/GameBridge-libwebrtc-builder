@@ -148,6 +148,7 @@ try {
     }
     & "$bridgeRoot/rtcbridge-native/tests/prepare_injector_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/pinned_injector_methods.h')
     & "$bridgeRoot/rtcbridge-native/tests/prepare_runtime_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/runtime_network_prefix.h')
+    & "$bridgeRoot/rtcbridge-native/tests/prepare_sender_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/pinned_sender_settings.h')
     & "$repository/src/rtcbridge-native/tests/ci_gn_tests.ps1" -GnExecutable (Join-Path $sourceRoot 'src/buildtools/win/gn.exe')
     Push-Location src
     try {
@@ -169,7 +170,7 @@ try {
         Copy-Item -LiteralPath 'PATENTS' -Destination (Join-Path $payload 'PATENTS.txt')
         # Qualify the inexpensive Windows startup and test diagnostics first.
         # Then run the production peer/ABI test before building probe/bench DLLs.
-        autoninja -C out/Release gamebridge/rtcbridge-native:rtc_runtime_socket_tests gamebridge/rtcbridge-native:rtc_connection_diagnostics_tests gamebridge/rtcbridge-native:rtc_native_core_tests gamebridge/rtcbridge-native:rtc_injector_cold_start_tests gamebridge/rtcbridge-native:rtc_bench_diagnostics_tests gamebridge/rtcbridge-native:rtc_transport_diagnostics_tests -j 4
+        autoninja -C out/Release gamebridge/rtcbridge-native:rtc_runtime_socket_tests gamebridge/rtcbridge-native:rtc_connection_diagnostics_tests gamebridge/rtcbridge-native:rtc_native_core_tests gamebridge/rtcbridge-native:rtc_injector_cold_start_tests gamebridge/rtcbridge-native:rtc_bench_diagnostics_tests gamebridge/rtcbridge-native:rtc_transport_diagnostics_tests gamebridge/rtcbridge-native:rtc_sender_bitrate_tests gamebridge/rtcbridge-native:rtc_sender_pacer_tests -j 4
         Check-Exit 'Focused native startup/core build'
         $binary=Join-Path $sourceRoot 'src/out/Release'
         & "$binary/rtc_runtime_socket_tests.exe";Check-Exit 'Winsock initialization before network construction'
@@ -178,6 +179,8 @@ try {
         & "$binary/rtc_injector_cold_start_tests.exe";Check-Exit 'Pinned injector single-frame cold start'
         & "$binary/rtc_bench_diagnostics_tests.exe";Check-Exit 'Consumer fatal reason and phase diagnostics'
         & "$binary/rtc_transport_diagnostics_tests.exe";Check-Exit 'Fixed numeric transport stats diagnostics'
+        & "$binary/rtc_sender_bitrate_tests.exe";Check-Exit 'Actual bridge and pinned encoder bitrate settings'
+        & "$binary/rtc_sender_pacer_tests.exe";Check-Exit 'Pinned pacer configured-rate regression'
         autoninja -C out/Release gamebridge/rtcbridge-native:gamebridge_rtc gamebridge/rtcbridge-native:rtc_abi_tests -j 4
         Check-Exit 'Production native bridge/ABI build'
         & "$binary/rtc_abi_tests.exe" "$binary/gamebridge_rtc.dll" production;Check-Exit 'Production RTC ABI'
@@ -205,6 +208,7 @@ $metadata=@{
     build_volume=$volume.Name;cleanup_skipped=$cleanupSkipped
     git_executable=$gitExe;git_version=$gitVersion;depot_bootstrap_revision=$depotAfterBootstrap
     runtime_socket='passed';connection_diagnostics='passed'
+    sender_bitrate='passed';sender_pacer='passed'
     core_tests='passed';injector_cold_start='passed';abi_production='passed';abi_probe='passed';short_gate='passed'
 }
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payload 'native-build.json') -Encoding UTF8

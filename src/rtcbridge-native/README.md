@@ -19,6 +19,14 @@ Application video queues have one pending AU; audio queues have a 200 ms bound.
 Only one additional injection per stream is admitted until its sender transform
 completes, bounding the upstream injector entry queue. Libwebrtc still owns its
 internal RTP pacer/retransmission buffers; these are not application AU queues.
+Video transceivers explicitly advertise a 25 Mbps encoding ceiling and 60 fps.
+The connection starts its bandwidth estimate at 25 Mbps, with its existing
+40 Mbps transport ceiling for overhead. Encoding/connection minima stay at
+1 Mbps so congestion control can back off below the normal 12-25 Mbps quality
+range. The connection-wide limit alone did not override upstream's 2.5 Mbps
+singlecast default; overshoot adjustment could reduce that to 1.25 Mbps. These
+are allocation hints and bounds, not forced throughput or disabled GCC. The
+external encoder still must obey bitrate/keyframe feedback on slower paths.
 The hash-pinned `patches/encoder-ready-drain.patch` drains the first buffered
 video frame when its encoder becomes ready, under upstream's existing lock and
 sequence guard. No second user frame or duplicate/dummy encoded AU is injected.
@@ -75,7 +83,13 @@ Build and artifact flow:
    avoiding PowerShell property expansion and batch-wrapper quote processing.
    Before the full graph, a regression runs the actual production GN block on
    a tiny SDK-free graph with the synchronized GN binary and checks every value.
-   Focused Winsock/core/injector/diagnostic tests run first; production ABI runs
+   Focused Winsock/core/injector/diagnostic and sender-bitrate tests run first.
+   Sender tests execute the verbatim bridge configuration with the hash-pinned
+   upstream singlecast-limit algorithm and the actual unmodified pacer. The
+   clock/source model covers 900 frames at 25.08 Mbps with periodic keyframes;
+   default-rate scenarios must expose truncation and explicit-rate scenarios
+   must deliver every frame. It is not a GCC, network or native-gate replay.
+   Production ABI runs
    before the remaining probe/benchmark variants are built. No build cache is
    used, and attestation still requires every ABI/media gate to pass.
    The hash-pinned `license-root-target.patch` gives upstream license queries

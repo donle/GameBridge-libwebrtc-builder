@@ -672,14 +672,26 @@ private:
     pc_->SetAudioRecording(false);
     w::BitrateSettings bitrate;
     bitrate.min_bitrate_bps = 1000000;
-    bitrate.start_bitrate_bps = 10000000;
+    bitrate.start_bitrate_bps = 25000000;
     bitrate.max_bitrate_bps = 40000000;
     if (!pc_->SetBitrate(bitrate).ok())
       return false;
     const auto weak = weak_from_this();
     for (unsigned kind = 0; kind < 2; ++kind) {
       auto media = kind == 0 ? w::MediaType::VIDEO : w::MediaType::AUDIO;
-      auto transceiver_result = pc_->AddTransceiver(media);
+      w::RtpTransceiverInit init;
+      if (kind == 0) {
+        // The connection limit does not configure the encoding. Otherwise
+        // singlecast defaults to 2.5 Mbps even for injected 1080p60 frames.
+        // Keep a low floor so congestion control may back off below the
+        // application's normal 12-25 Mbps quality range on a slower route.
+        w::RtpEncodingParameters encoding;
+        encoding.min_bitrate_bps = 1000000;
+        encoding.max_bitrate_bps = 25000000;
+        encoding.max_framerate = 60;
+        init.send_encodings.push_back(encoding);
+      }
+      auto transceiver_result = pc_->AddTransceiver(media, init);
       if (!transceiver_result.ok())
         return false;
       auto transceiver = transceiver_result.MoveValue();

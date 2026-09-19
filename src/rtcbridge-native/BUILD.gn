@@ -125,6 +125,30 @@ executable("rtc_transport_diagnostics_tests") {
   configs += [ ":bridge_config" ]
 }
 
+executable("rtc_sender_bitrate_tests") {
+  sources = [ "tests/sender_bitrate_tests.cpp" ]
+  configs += [ ":bridge_config" ]
+}
+
+executable("rtc_sender_pacer_tests") {
+  sources = [ "tests/sender_pacer_tests.cpp" ]
+  configs += [
+    "//:common_config",
+    ":bridge_config",
+  ]
+  deps = [
+    "//api:field_trials_view",
+    "//api/transport:network_control",
+    "//api/units:data_rate",
+    "//api/units:data_size",
+    "//api/units:time_delta",
+    "//api/units:timestamp",
+    "//modules/pacing",
+    "//modules/rtp_rtcp:rtp_rtcp_format",
+    "//system_wrappers",
+  ]
+}
+
 group("all") {
   deps = [
     ":gamebridge_rtc",
@@ -137,6 +161,8 @@ group("all") {
     ":rtc_injector_cold_start_tests",
     ":rtc_native_core_tests",
     ":rtc_runtime_socket_tests",
+    ":rtc_sender_bitrate_tests",
+    ":rtc_sender_pacer_tests",
     ":rtc_transport_diagnostics_tests",
   ]
 }
