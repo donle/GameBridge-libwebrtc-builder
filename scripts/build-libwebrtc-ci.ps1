@@ -142,8 +142,8 @@ try {
             New-Item -ItemType Directory -Path (Join-Path $bridgeRoot 'rtcbridge/include') -Force | Out-Null
             Copy-Item -LiteralPath (Join-Path $repository 'src/rtcbridge/include/gamebridge_rtc.h') -Destination (Join-Path $bridgeRoot 'rtcbridge/include')
         }else{
-            foreach($folder in @('tests','bench')){New-Item -ItemType Directory -Path (Join-Path $bridgeRoot "native/$folder") -Force | Out-Null}
-            foreach($file in @('tests/rtc_abi_tests.cpp','tests/rtc_abi_c_layout.c','tests/rtc_media_fixture.h','tests/rtc_connection_diagnostics.h','bench/rtc_bridge_bench.cpp','bench/pacing.h')){Copy-Item -LiteralPath (Join-Path $repository "src/native/$file") -Destination (Join-Path $bridgeRoot "native/$file")}
+            foreach($folder in @('tests','bench','include/gamebridge/audio','src/audio')){New-Item -ItemType Directory -Path (Join-Path $bridgeRoot "native/$folder") -Force | Out-Null}
+            foreach($file in @('tests/rtc_abi_tests.cpp','tests/rtc_abi_c_layout.c','tests/rtc_media_fixture.h','tests/rtc_connection_diagnostics.h','bench/rtc_bridge_bench.cpp','bench/pacing.h','include/gamebridge/audio/audio_clock.h','include/gamebridge/audio/opus_codec.h','src/audio/audio_clock.cpp','src/audio/opus_codec.cpp')){Copy-Item -LiteralPath (Join-Path $repository "src/native/$file") -Destination (Join-Path $bridgeRoot "native/$file")}
         }
     }
     & "$bridgeRoot/rtcbridge-native/tests/prepare_injector_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/pinned_injector_methods.h')

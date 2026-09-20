@@ -24,6 +24,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Validate exact published source and ABI-test dependencies
+        run: ./src/rtcbridge-native/tests/export_manifest_tests.ps1
       - name: Validate read-only hosted storage policy
         run: ./src/rtcbridge-native/tests/ci_storage_tests.ps1
       - name: Validate deterministic native Git selection
