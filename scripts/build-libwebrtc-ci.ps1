@@ -170,12 +170,13 @@ try {
         Copy-Item -LiteralPath 'PATENTS' -Destination (Join-Path $payload 'PATENTS.txt')
         # Qualify the inexpensive Windows startup and test diagnostics first.
         # Then run the production peer/ABI test before building probe/bench DLLs.
-        autoninja -C out/Release gamebridge/rtcbridge-native:rtc_runtime_socket_tests gamebridge/rtcbridge-native:rtc_connection_diagnostics_tests gamebridge/rtcbridge-native:rtc_native_core_tests gamebridge/rtcbridge-native:rtc_injector_cold_start_tests gamebridge/rtcbridge-native:rtc_bench_diagnostics_tests gamebridge/rtcbridge-native:rtc_transport_diagnostics_tests gamebridge/rtcbridge-native:rtc_sender_bitrate_tests gamebridge/rtcbridge-native:rtc_sender_pacer_tests -j 4
+        autoninja -C out/Release gamebridge/rtcbridge-native:rtc_runtime_socket_tests gamebridge/rtcbridge-native:rtc_connection_diagnostics_tests gamebridge/rtcbridge-native:rtc_native_core_tests gamebridge/rtcbridge-native:rtc_injector_cold_start_tests gamebridge/rtcbridge-native:rtc_bench_diagnostics_tests gamebridge/rtcbridge-native:rtc_transport_diagnostics_tests gamebridge/rtcbridge-native:rtc_network_diagnostics_tests gamebridge/rtcbridge-native:rtc_sender_bitrate_tests gamebridge/rtcbridge-native:rtc_sender_pacer_tests -j 4
         Check-Exit 'Focused native startup/core build'
         $binary=Join-Path $sourceRoot 'src/out/Release'
         & "$binary/rtc_runtime_socket_tests.exe";Check-Exit 'Winsock initialization before network construction'
         & "$binary/rtc_connection_diagnostics_tests.exe";Check-Exit 'Sanitized deterministic connection diagnostics'
         & "$binary/rtc_native_core_tests.exe";Check-Exit 'Native core tests'
+        & "$binary/rtc_network_diagnostics_tests.exe";Check-Exit 'Numeric network diagnostics tests'
         & "$binary/rtc_injector_cold_start_tests.exe";Check-Exit 'Pinned injector single-frame cold start'
         & "$binary/rtc_bench_diagnostics_tests.exe";Check-Exit 'Consumer fatal reason and phase diagnostics'
         & "$binary/rtc_transport_diagnostics_tests.exe";Check-Exit 'Fixed numeric transport stats diagnostics'

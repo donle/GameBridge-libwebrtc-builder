@@ -7,12 +7,13 @@ New-Item -ItemType Directory -Path $scratch | Out-Null
 try {
     $result=Join-Path $scratch 'report.json'
     $relativeResult=$result.Substring($repository.Length+1)
+    foreach($requestedOutput in @($relativeResult,$result)) {
     [IO.File]::WriteAllText($result,'{"passed":true,"sdp":"PRIVATE_SENTINEL"}')
     [IO.File]::WriteAllText(($result+'.consumer.json'),'{"passed":true,"sdp":"PRIVATE_SENTINEL"}')
     $script:gateLog=''
     $failed=$false
     try {
-        & "$repository/scripts/test-rtc-native-gate.ps1" -DurationSeconds 5 -ArtifactDirectory $scratch -Output $relativeResult -FFmpeg (Join-Path $scratch 'missing-ffmpeg.exe') 6>&1 | ForEach-Object { $script:gateLog += [string]$_ + "`n" }
+        & "$repository/scripts/test-rtc-native-gate.ps1" -DurationSeconds 5 -ArtifactDirectory $scratch -Output $requestedOutput -FFmpeg (Join-Path $scratch 'missing-ffmpeg.exe') 6>&1 | ForEach-Object { $script:gateLog += [string]$_ + "`n" }
     } catch { $failed=$true }
     if(!$failed){throw 'Preparation failure was accepted'}
     $saved=Get-Content -Raw -LiteralPath $result | ConvertFrom-Json
@@ -20,6 +21,7 @@ try {
     if($script:gateLog -notmatch 'NATIVE RTC REPORT BEGIN' -or $script:gateLog -notmatch '"passed":\s*false'){throw 'Preparation failure did not publish its complete safe diagnostic report'}
     if($saved.diagnostic_stage -cne 'fixture_generation'){throw 'Preparation failure stage was lost'}
     if($script:gateLog.Contains('PRIVATE_SENTINEL') -or (Get-Content -Raw -LiteralPath $result).Contains('PRIVATE_SENTINEL')){throw 'Stale report data escaped'}
+    }
 
     $report=[pscustomobject]@{
         passed=$false;frames_delivered=291;frames_submitted=300;frames_dropped_bridge=2;frames_dropped_receiver=3

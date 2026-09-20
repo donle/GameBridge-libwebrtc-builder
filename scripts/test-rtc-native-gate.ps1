@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 . "$PSScriptRoot/validate-rtc-native-gate.ps1"
 $repository=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $artifact=[IO.Path]::GetFullPath($ArtifactDirectory)
-$resultPath=[IO.Path]::GetFullPath((Join-Path $repository $Output))
+$resultPath=if([IO.Path]::IsPathRooted($Output)){[IO.Path]::GetFullPath($Output)}else{[IO.Path]::GetFullPath((Join-Path $repository $Output))}
 if ($env:GITHUB_ACTIONS -ne 'true' -and ([IO.Path]::GetPathRoot($repository) -ine 'D:\' -or [IO.Path]::GetPathRoot($artifact) -ine 'D:\' -or [IO.Path]::GetPathRoot($resultPath) -ine 'D:\')) { throw 'Local native RTC artifacts and output must remain on D:' }
 New-Item -ItemType Directory -Force ([IO.Path]::GetDirectoryName($resultPath)) | Out-Null
 $report=[pscustomobject]@{passed=$false}
@@ -54,6 +54,7 @@ $report | Add-Member rtc_dll_sha256 (Get-FileHash -Algorithm SHA256 -LiteralPath
 $report | Add-Member native_consumer_sha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $consumer).Hash.ToLowerInvariant() -Force
 $report | Add-Member gc_measurement 'not applicable: native libwebrtc DLL has no Go garbage collector' -Force
 $stage='consumer'
+Test-NativeRtcEvidence $report
 if ($consumerResult -ne 0) { throw 'Native RTC consumer failed; no qualification claimed' }
 $stage='validation'
     $validation=Test-NativeRtcGate $report $DurationSeconds

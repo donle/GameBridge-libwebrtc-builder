@@ -33,6 +33,8 @@ struct Benchmark {
 };
 inline std::mutex benchmark_mutex;
 inline std::shared_ptr<Benchmark> benchmark;
+// Retain counters only, not peer connections, until the post-close snapshot.
+inline std::array<std::shared_ptr<DirectDiagnostics>,2> benchmark_evidence;
 } // namespace gamebridge::rtc
 extern "C" {
 GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_bench_begin(
@@ -49,6 +51,7 @@ GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_bench_begin(
     auto b = std::make_shared<Benchmark>();
     b->sender = s;
     b->receiver = r;
+    benchmark_evidence={s->direct_diagnostics,r->direct_diagnostics};
     b->stamps = stamps;
     b->count = count;
     b->first = first;
@@ -135,5 +138,17 @@ GB_RTC_API uint32_t GB_RTC_CALL gb_rtc_bench_end(uint8_t *output,
   } catch (...) {
     return 0;
   }
+}
+GB_RTC_API uint32_t GB_RTC_CALL gb_rtc_bench_evidence(uint8_t* output,uint32_t capacity){
+  try{
+    if(!output||capacity<16384)return 0;
+    std::array<std::shared_ptr<DirectDiagnostics>,2> evidence;
+    {std::lock_guard lock(benchmark_mutex);evidence=benchmark_evidence;}
+    if(!evidence[0]||!evidence[1])return 0;
+    std::ostringstream json;json<<"{\"network_evidence_schema\":1";
+    evidence[0]->Write(json,"sender");evidence[1]->Write(json,"receiver");json<<'}';
+    const auto bytes=json.str();if(bytes.size()>capacity)return 0;
+    std::memcpy(output,bytes.data(),bytes.size());return static_cast<uint32_t>(bytes.size());
+  }catch(...){return 0;}
 }
 }

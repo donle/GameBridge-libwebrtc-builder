@@ -67,6 +67,50 @@ function Test-NativeRtcDiagnosticNumber($Value) {
     ![double]::IsNaN([double]$Value) -and ![double]::IsInfinity([double]$Value)
 }
 
+# Evidence integrity is separate from Test-NativeRtcGate's unchanged acceptance
+# thresholds. Schema 1 contains fixed numeric counters only.
+function Get-NativeRtcEvidenceFields {
+    $fields=@('network_evidence_schema','producer_evidence_schema','fatal_producer_errors','fatal_callback_other_errors')
+    foreach($source in @('video','audio','data')){foreach($result in @('attempts','ok','backpressure','state','invalid','closed','other')){$fields+="producer_${source}_$result"}}
+    foreach($peer in @('sender','receiver')){
+        foreach($transition in @('initial','regressions','recoveries','terminal','transitions')){$fields+="native_${peer}_proof_$transition"}
+        foreach($reason in @('missing_selected_pair','missing_pair_record','missing_candidate_record','missing_candidate_type','pair_not_succeeded','relay','timeout','other')){
+            $fields+="native_${peer}_regression_$reason";$fields+="native_${peer}_terminal_$reason"
+        }
+    }
+    $fields
+}
+function Test-NativeRtcEvidence($Report) {
+    foreach($field in ((Get-NativeRtcEvidenceFields)+@('fatal_other_errors','frames_submitted','submission_failures'))){
+        $property=$Report.PSObject.Properties[$field]
+        if($null-eq $property -or !(Test-NativeRtcDiagnosticNumber $property.Value) -or
+           $property.Value-lt 0 -or $property.Value-gt 9007199254740991 -or [math]::Floor($property.Value)-ne $property.Value){throw "Invalid numeric network evidence: $field"}
+    }
+    if($Report.network_evidence_schema-ne 1 -or $Report.producer_evidence_schema-ne 1){throw 'Unsupported numeric network evidence schema'}
+    [long]$producerFatal=0
+    foreach($source in @('video','audio','data')){
+        [long]$sum=0
+        foreach($result in @('ok','backpressure','state','invalid','closed','other')){$sum+=$Report."producer_${source}_$result"}
+        if($sum-ne $Report."producer_${source}_attempts"){throw 'Producer result partition mismatch'}
+        foreach($result in @('state','invalid','closed','other')){$producerFatal+=$Report."producer_${source}_$result"}
+    }
+    if($Report.producer_video_ok-ne $Report.frames_submitted -or
+       ($Report.producer_video_attempts-$Report.producer_video_ok)-ne $Report.submission_failures -or
+       $producerFatal-ne $Report.fatal_producer_errors -or
+       ($Report.fatal_producer_errors+$Report.fatal_callback_other_errors)-ne $Report.fatal_other_errors){throw 'Producer/frame/fatal origin partition mismatch'}
+    foreach($peer in @('sender','receiver')){
+        [long]$sum=0;foreach($transition in @('initial','regressions','recoveries','terminal')){$sum+=$Report."native_${peer}_proof_$transition"}
+        if($sum-ne $Report."native_${peer}_proof_transitions" -or $Report."native_${peer}_proof_initial"-gt 1 -or
+           $Report."native_${peer}_proof_terminal"-gt 1 -or $Report."native_${peer}_proof_recoveries"-gt $Report."native_${peer}_proof_regressions"){throw 'Direct proof transition partition mismatch'}
+        foreach($kind in @('regression','terminal')){
+            [long]$reasons=0
+            foreach($reason in @('missing_selected_pair','missing_pair_record','missing_candidate_record','missing_candidate_type','pair_not_succeeded','relay','timeout','other')){$reasons+=$Report."native_${peer}_${kind}_$reason"}
+            $count=if($kind-ceq 'regression'){'regressions'}else{'terminal'}
+            if($reasons-ne $Report."native_${peer}_proof_$count"){throw 'Direct proof reason partition mismatch'}
+        }
+    }
+}
+
 function ConvertTo-NativeRtcDiagnostic {
     param([Parameter(Mandatory)]$Report,[int]$DurationSeconds,
         [ValidateSet('preparation','fixture_generation','fixture_decode','consumer','report_read','validation','complete')][string]$Stage)
@@ -93,6 +137,8 @@ function ConvertTo-NativeRtcDiagnostic {
             'inbound_packets_received','inbound_bytes_received','inbound_packets_lost','inbound_packets_discarded','inbound_frames_received',
             'inbound_nack_count','available_outgoing_bitrate_bps','stats_age_ms')) {$numeric += "native_${role}_$metric"}
     }
+    $evidenceFields=@(Get-NativeRtcEvidenceFields)
+    $numeric+=$evidenceFields
     $safe=[ordered]@{report_schema_version=2;passed=$false;diagnostic_stage=$Stage;requested_duration_seconds=$DurationSeconds;frames_expected_min=(Get-NativeRtcMinimumFrames $DurationSeconds)}
     $verdict=$Report.PSObject.Properties['passed']
     if($Stage -ceq 'complete' -and $null -ne $verdict -and $verdict.Value -is [bool]){$safe.passed=$verdict.Value}
@@ -100,7 +146,9 @@ function ConvertTo-NativeRtcDiagnostic {
     foreach($name in $numeric){
         $property=$Report.PSObject.Properties[$name]
         if($null -eq $property){continue}
-        if(Test-NativeRtcDiagnosticNumber $property.Value){$safe[$name]=$property.Value}else{$safe[$name]=$null;$redacted++}
+        $validNumber=Test-NativeRtcDiagnosticNumber $property.Value
+        if($validNumber -and $name -cin $evidenceFields){$validNumber=$property.Value-ge 0 -and $property.Value-le 9007199254740991 -and [math]::Floor($property.Value)-eq $property.Value}
+        if($validNumber){$safe[$name]=$property.Value}else{$safe[$name]=$null;$redacted++}
     }
     $strings=@{
         rtc_backend='^(libwebrtc|pion)$';libwebrtc_revision='^[a-f0-9]{40}$'
@@ -224,6 +272,7 @@ function Write-NativeRtcDiagnostic($Report,[string]$Path,[switch]$Quiet) {
 if ($ValidationReportPath) {
     $validatedReport=Get-Content -Raw -LiteralPath $ValidationReportPath | ConvertFrom-Json
     Test-NativeRtcGate $validatedReport $ValidationDurationSeconds | Out-Null
+    if($null-ne $validatedReport.PSObject.Properties['network_evidence_schema']){Test-NativeRtcEvidence $validatedReport}
     if ($validatedReport.passed -isnot [bool] -or !$validatedReport.passed) { throw 'Native RTC report does not claim a completed passing gate' }
     Write-Host "NATIVE RTC VALIDATION PASS duration=$ValidationDurationSeconds route=direct"
 }

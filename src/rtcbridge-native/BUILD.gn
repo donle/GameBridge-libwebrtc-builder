@@ -115,6 +115,7 @@ executable("rtc_abi_tests") {
 
 executable("rtc_bridge_bench") {
   sources = [ "../native/bench/rtc_bridge_bench.cpp" ]
+  defines = [ "GB_RTC_NATIVE_EVIDENCE" ]
   configs -= [ "//build/config/compiler:no_exceptions" ]
   configs += [
     "//build/config/compiler:exceptions",
@@ -128,6 +129,7 @@ executable("rtc_bridge_bench") {
 
 executable("rtc_bench_diagnostics_tests") {
   sources = [ "tests/bench_diagnostics_tests.cpp" ]
+  defines = [ "GB_RTC_NATIVE_EVIDENCE" ]
   configs -= [ "//build/config/compiler:no_exceptions" ]
   configs += [
     "//build/config/compiler:exceptions",
@@ -138,6 +140,11 @@ executable("rtc_bench_diagnostics_tests") {
 
 executable("rtc_transport_diagnostics_tests") {
   sources = [ "tests/transport_diagnostics_tests.cpp" ]
+  configs += [ ":bridge_config" ]
+}
+
+executable("rtc_network_diagnostics_tests") {
+  sources = [ "tests/network_diagnostics_tests.cpp" ]
   configs += [ ":bridge_config" ]
 }
 
@@ -176,6 +183,7 @@ group("all") {
     ":rtc_connection_diagnostics_tests",
     ":rtc_injector_cold_start_tests",
     ":rtc_native_core_tests",
+    ":rtc_network_diagnostics_tests",
     ":rtc_runtime_socket_tests",
     ":rtc_sender_bitrate_tests",
     ":rtc_sender_pacer_tests",

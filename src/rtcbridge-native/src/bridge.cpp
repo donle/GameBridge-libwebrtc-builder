@@ -20,6 +20,7 @@
 #include "json.h"
 #ifdef GB_RTC_BENCH
 #include "transport_diagnostics.h"
+#include "network_diagnostics.h"
 #endif
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
@@ -232,6 +233,7 @@ public:
   std::atomic<int64_t> allocated_bitrate{}, bandwidth_allocation{};
   std::mutex diagnostic_mutex;
   TransportSnapshot diagnostic_stats;
+  std::shared_ptr<DirectDiagnostics> direct_diagnostics=std::make_shared<DirectDiagnostics>();
 #endif
 #ifdef GB_RTC_TESTING
   gb_rtc_result Probe(uint32_t kind, std::span<const uint8_t> bytes) {
@@ -253,6 +255,9 @@ public:
     Queue(GB_RTC_EVENT_BITRATE, "{\"bitsPerSecond\":10000000}");
   }
   void Close() {
+#ifdef GB_RTC_BENCH
+    direct_diagnostics->Terminal(ProofEvidence::Other);
+#endif
     if (network_.direct_only)
       direct_route_gate_.Close();
     closed = true;
@@ -300,6 +305,10 @@ public:
   void Fail(std::string_view code) {
     if (closed)
       return;
+#ifdef GB_RTC_BENCH
+    direct_diagnostics->Terminal(code=="direct_route_unproven"?ProofEvidence::Timeout:
+      code=="relay_forbidden"?ProofEvidence::Relay:ProofEvidence::Other);
+#endif
     if (network_.direct_only)
       direct_route_gate_.Close();
     if (failed.exchange(true))
@@ -770,6 +779,7 @@ public:
 
           DirectPairEvidence direct_evidence = DirectPairEvidence::Missing;
 #ifdef GB_RTC_BENCH
+          ProofEvidence evidence_reason=ProofEvidence::MissingSelectedPair;
           TransportSnapshot diagnostics;
           for (const auto *stats :
                report.GetStatsOfType<w::RTCOutboundRtpStreamStats>())
@@ -788,6 +798,11 @@ public:
                 !pair->remote_candidate_id || !pair->state ||
                 *pair->state != "succeeded") {
               direct_evidence = DirectPairEvidence::Mismatched;
+#ifdef GB_RTC_BENCH
+              evidence_reason=!pair?ProofEvidence::MissingPairRecord:
+                (!pair->local_candidate_id||!pair->remote_candidate_id)?ProofEvidence::MissingCandidateRecord:
+                ProofEvidence::PairNotSucceeded;
+#endif
               continue;
             }
 #ifdef GB_RTC_BENCH
@@ -803,6 +818,9 @@ public:
               direct_evidence = local && remote
                                     ? DirectPairEvidence::Unconvertible
                                     : DirectPairEvidence::Mismatched;
+#ifdef GB_RTC_BENCH
+              evidence_reason=local&&remote?ProofEvidence::MissingCandidateType:ProofEvidence::MissingCandidateRecord;
+#endif
               continue;
             }
             const auto direct = [](const std::string &type) {
@@ -820,6 +838,9 @@ public:
                 break;
               }
               direct_evidence = DirectPairEvidence::Unconvertible;
+#ifdef GB_RTC_BENCH
+              evidence_reason=ProofEvidence::Other;
+#endif
               continue;
             }
             const bool relay = *local->candidate_type == "relay" ||
@@ -832,6 +853,9 @@ public:
                                                  GetTickCount64())) {
             case DirectProofResult::Proven:
               if (self->MarkDirectRouteProven()) {
+#ifdef GB_RTC_BENCH
+                self->direct_diagnostics->Proven();
+#endif
                 self->Queue(GB_RTC_EVENT_ROUTE, "{\"route\":1}");
                 self->WakeMedia();
               }
@@ -839,6 +863,9 @@ public:
             case DirectProofResult::Stable:
               break;
             case DirectProofResult::Regressed:
+#ifdef GB_RTC_BENCH
+              self->direct_diagnostics->Regressed(evidence_reason);
+#endif
               self->LoseDirectRoute(DirectProofResult::Regressed);
               self->ArmDirectProofDeadline();
               break;

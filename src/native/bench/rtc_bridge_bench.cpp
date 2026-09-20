@@ -3,6 +3,7 @@
 
 #include "gamebridge_rtc.h"
 #include "pacing.h"
+#include "../../rtcbridge-native/src/network_diagnostics.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -113,6 +114,7 @@ struct Api {
   Begin begin{};
   using End = uint32_t(__cdecl *)(uint8_t *, uint32_t);
   End end{};
+  End evidence{};
   explicit Api(const char *path) {
     auto dll = LoadLibraryA(path);
     require(dll != nullptr, "dll_load");
@@ -128,6 +130,9 @@ struct Api {
     LOAD(video, "gb_rtc_send_video");
     LOAD(begin, "gb_rtc_bench_begin");
     LOAD(end, "gb_rtc_bench_end");
+#ifdef GB_RTC_NATIVE_EVIDENCE
+    LOAD(evidence, "gb_rtc_bench_evidence");
+#endif
 #undef LOAD
   }
 };
@@ -167,12 +172,19 @@ struct Context {
   std::atomic<uint64_t> payload_size_errors{}, payload_content_errors{},
       payload_matches_other_fixture{};
   std::atomic<unsigned> phase{static_cast<unsigned>(Phase::Setup)};
+  gamebridge::rtc::ProducerDiagnostics producer;
+  std::atomic<uint64_t> fatal_producer{},fatal_callback_other{};
   std::atomic<bool> connected{}, route{}, closed{};
   uint32_t first = 600, count{}, step = 1500;
-  void RecordFatal(FatalReason reason) noexcept {
+  void RecordFatal(FatalReason reason,bool from_producer=false) noexcept {
+    if(reason==FatalReason::Other){if(from_producer)++fatal_producer;else ++fatal_callback_other;}
     ++fatal_reason[static_cast<unsigned>(reason)];
     ++fatal_phase[phase.load()];
     ++fatal;
+  }
+  void RecordProducerResult(gamebridge::rtc::ProducerSource source,gb_rtc_result result){
+    producer.Record(source,result,closed.load());
+    if(result!=GB_RTC_OK&&result!=GB_RTC_BACKPRESSURE)RecordFatal(FatalReason::Other,true);
   }
   // Called only after both close barriers, when seen is no longer being
   // written.
@@ -445,14 +457,13 @@ int run(int argc, char **argv) {
       stamps[index - 600] = qpc();
     const auto result = api.video(peers.handles[0], &v);
     if (recorded) {
+      peers.context[0].RecordProducerResult(gamebridge::rtc::ProducerSource::Video,result);
       if (result == GB_RTC_OK) {
         accepted[index - 600] = 1;
         ++submitted;
         sendBytes += f.data.size();
       } else {
         ++submissionFailures;
-        if (result != GB_RTC_BACKPRESSURE)
-          peers.context[0].RecordFatal(FatalReason::Other);
       }
     } else
       require(result == GB_RTC_OK, "prewarm_submit");
@@ -536,10 +547,22 @@ int run(int argc, char **argv) {
     peers.handles[i] = 0;
   }
   Sleep(100);
+#ifdef GB_RTC_NATIVE_EVIDENCE
+  std::array<uint8_t,16384> evidence{};
+  const auto evidence_length=api.evidence(evidence.data(),static_cast<uint32_t>(evidence.size()));
+  require(evidence_length>2&&evidence_length<=evidence.size(),"network_evidence");
+#endif
   std::ofstream out(argv[4], std::ios::binary);
   require(bool(out), "report_open");
   out << std::setprecision(12);
   out.write(reinterpret_cast<const char *>(metrics.data()), length - 1);
+#ifdef GB_RTC_NATIVE_EVIDENCE
+  out<<',';
+  out.write(reinterpret_cast<const char *>(evidence.data()+1),evidence_length-2);
+  peers.context[0].producer.Write(out);
+  out<<",\"fatal_producer_errors\":"<<peers.context[0].fatal_producer+peers.context[1].fatal_producer
+     <<",\"fatal_callback_other_errors\":"<<peers.context[0].fatal_callback_other+peers.context[1].fatal_callback_other;
+#endif
   const auto missing = peers.context[1].SummarizeMissing(accepted);
   out << ",\"missing_frame_count\":" << missing.total
       << ",\"missing_head_frames\":" << missing.head

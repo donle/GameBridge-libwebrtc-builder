@@ -37,6 +37,7 @@ jobs:
       - name: Validate direct-only gate failures and sanitized diagnostics
         run: |
           ./src/rtcbridge-native/tests/gate_tests.ps1
+          ./src/rtcbridge-native/tests/network_diagnostics_tests.ps1
           ./src/rtcbridge-native/tests/gate_diagnostic_tests.ps1
           ./src/rtcbridge-native/tests/gate_atomic_tests.ps1
       - name: Build and test only on ephemeral hosted Windows

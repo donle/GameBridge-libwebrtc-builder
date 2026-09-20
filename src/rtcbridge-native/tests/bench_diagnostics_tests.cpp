@@ -2,6 +2,8 @@
 #define main rtc_bench_embedded_main
 #include "../../native/bench/rtc_bridge_bench.cpp"
 #undef main
+#include "../src/network_diagnostics.h"
+#include <sstream>
 
 namespace {
 void Check(bool value, const char *message) {
@@ -178,7 +180,26 @@ template <class C> void MissingDistribution() {
     Check(false, "consumer lacks bounded missing-frame distribution");
   }
 }
-int main() {
+template<class C> void ProducerResults() {
+  using gamebridge::rtc::ProducerSource;
+  if constexpr(requires(C& c){c.RecordProducerResult(ProducerSource::Video,GB_RTC_OK);c.fatal_producer.load();c.fatal_callback_other.load();}) {
+    C c;
+    c.RecordProducerResult(ProducerSource::Video,GB_RTC_OK);
+    c.RecordProducerResult(ProducerSource::Video,GB_RTC_BACKPRESSURE);
+    c.RecordProducerResult(ProducerSource::Video,GB_RTC_STATE);
+    c.RecordProducerResult(ProducerSource::Audio,GB_RTC_INVALID);
+    c.closed=true;c.RecordProducerResult(ProducerSource::Data,GB_RTC_STATE);c.closed=false;
+    c.RecordProducerResult(ProducerSource::Data,GB_RTC_INTERNAL);
+    c.RecordFatal(FatalReason::Other);
+    Check(c.fatal==5&&c.fatal_producer==4&&c.fatal_callback_other==1,
+          "producer rejection must be distinct from callback other fatal");
+    std::ostringstream evidence;c.producer.Write(evidence);
+    Check(evidence.str().find("\"producer_video_state\":1")!=std::string::npos&&
+          evidence.str().find("\"producer_data_closed\":1")!=std::string::npos,
+          "actual consumer result classification must preserve STATE versus known closure");
+  } else Check(false,"consumer lacks producer-result origin diagnostics");
+}
+int main(int argc,char** argv) {
   try {
     Context route;
     const auto deliver_route = [&](const char* json) {
@@ -195,7 +216,9 @@ int main() {
     Check(!route.route && route.fatal == 2,
           "selected relay must revoke direct proof and fail qualification");
     ReasonsAndPhases<Context>();
+    ProducerResults<Context>();
     MissingDistribution<Context>();
+    if(argc==2){Api legacy_api(argv[1]);}
     std::puts("RTC consumer diagnostics: actual callback reasons, phases, "
               "teardown and stale barrier PASS");
     return 0;
