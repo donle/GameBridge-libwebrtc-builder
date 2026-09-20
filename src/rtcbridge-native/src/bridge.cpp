@@ -238,6 +238,18 @@ public:
   std::shared_ptr<DirectDiagnostics> direct_diagnostics=std::make_shared<DirectDiagnostics>();
 #endif
 #ifdef GB_RTC_TESTING
+  gb_rtc_result ProbeDirectRoute(uint32_t kind) {
+    if (closed || failed || !network_.direct_only) return GB_RTC_STATE;
+    Engine().signaling->BlockingCall([&] {
+      if (!direct_proof_) direct_proof_.emplace(GetTickCount64());
+      SelectedPairIdentity identity{"pair-a", "local-a", "remote-a", "host", "host"};
+      if (kind == 22) identity.pair = "pair-b";
+      const auto evidence = kind == 23 ? DirectPairEvidence::Missing :
+          selected_pair_.Observe(identity, kind == 21 ? "in-progress" : kind == 24 ? "failed" : "succeeded").evidence;
+      ApplyDirectEvidence(evidence, GetTickCount64());
+    });
+    return GB_RTC_OK;
+  }
   gb_rtc_result Probe(uint32_t kind, std::span<const uint8_t> bytes) {
     return callbacks.Invoke([&] {
       if (callback_)
@@ -862,35 +874,12 @@ public:
             else
               self->direct_diagnostics->SampleSucceeded();
 #endif
-            switch (self->direct_proof_->Observe(direct_evidence,
-                                                 GetTickCount64())) {
-            case DirectProofResult::Proven:
-              if (self->MarkDirectRouteProven()) {
 #ifdef GB_RTC_BENCH
-                self->direct_diagnostics->Proven();
-#endif
-                self->Queue(GB_RTC_EVENT_ROUTE, "{\"route\":1}");
-                self->WakeMedia();
-              }
-              break;
-            case DirectProofResult::Stable:
-              break;
-            case DirectProofResult::Regressed:
-#ifdef GB_RTC_BENCH
+            if (direct_evidence != DirectPairEvidence::Direct && self->direct_route_gate_.Proven())
               self->direct_diagnostics->Regressed(evidence_reason);
 #endif
-              self->LoseDirectRoute(DirectProofResult::Regressed);
-              self->ArmDirectProofDeadline();
-              break;
-            case DirectProofResult::Expired:
-              self->Fail("direct_route_unproven");
-              return;
-            case DirectProofResult::Forbidden:
-              self->Fail("relay_forbidden");
-              return;
-            case DirectProofResult::Pending:
-              break;
-            }
+            self->ApplyDirectEvidence(direct_evidence, GetTickCount64());
+            if (self->failed) return;
           }
 #ifdef GB_RTC_BENCH
           LARGE_INTEGER now{};
@@ -913,6 +902,28 @@ public:
   }
 
 private:
+  void ApplyDirectEvidence(DirectPairEvidence evidence, uint64_t now) {
+    if (closed || failed || !direct_proof_) return;
+    switch (direct_proof_->Observe(evidence, now)) {
+    case DirectProofResult::Proven:
+      if (MarkDirectRouteProven()) {
+#ifdef GB_RTC_BENCH
+        direct_diagnostics->Proven();
+#endif
+        Queue(GB_RTC_EVENT_ROUTE, "{\"route\":1}");
+        WakeMedia();
+      }
+      break;
+    case DirectProofResult::Regressed:
+      LoseDirectRoute(DirectProofResult::Regressed);
+      Fail("direct_route_lost");
+      break;
+    case DirectProofResult::Expired: Fail("direct_route_unproven"); break;
+    case DirectProofResult::Forbidden: Fail("relay_forbidden"); break;
+    case DirectProofResult::Stable:
+    case DirectProofResult::Pending: break;
+    }
+  }
   bool MarkDirectRouteProven() {
     return direct_route_gate_.Prove();
   }
@@ -1464,6 +1475,8 @@ GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_test_probe(gb_rtc_handle handle,
       return GB_RTC_STATE;
     if (kind == 99)
       throw std::runtime_error("probe");
+    if (kind >= 20 && kind <= 24)
+      return s->ProbeDirectRoute(kind);
     auto frame = kind == 1   ? s->video.Pop()
                  : kind == 2 ? s->audio.Pop()
                              : std::optional<Media>(Media{{1, 2, 3}, 0, 0});

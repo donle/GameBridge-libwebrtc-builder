@@ -188,6 +188,7 @@ try {
         autoninja -C out/Release gamebridge/rtcbridge-native:all -j 4
         Check-Exit 'Remaining native probe/benchmark build'
         & "$binary/rtc_abi_tests.exe" "$binary/gamebridge_rtc_probe.dll" probe;Check-Exit 'Probe RTC ABI'
+        & "$binary/rtc_abi_tests.exe" "$binary/gamebridge_rtc_probe.dll" probe-route;Check-Exit 'Terminal direct route RTC callbacks'
     } finally {Pop-Location}
 } finally {Pop-Location}
 $ffmpegArchive=Join-Path $buildRoot 'ffmpeg.zip'

@@ -245,7 +245,8 @@ int connect_native_peers(Api& api, const gb_rtc_config& config,
 
 int main(int argc, char** argv) {
   CHECK(argc == 3); // Production and instrumented copies run in separate processes.
-  const bool testing = std::strcmp(argv[2], "probe") == 0;
+  const bool route_testing = std::strcmp(argv[2], "probe-route") == 0;
+  const bool testing = std::strcmp(argv[2], "probe") == 0 || route_testing;
   Api api; CHECK(api.load(argv[1], testing));
   CHECK(gb_rtc_c_layout());
   const char ice[] = "{}";
@@ -253,6 +254,38 @@ int main(int argc, char** argv) {
   gb_rtc_network_config network{sizeof(network), GB_RTC_ABI_VERSION,
                                 GB_RTC_NETWORK_DIRECT_ONLY, 47981, 47990, 0,
                                 {}, {}, {}};
+  if (route_testing) {
+    for (uint32_t loss : {22U, 23U, 24U}) {
+      PeerEvents events; gb_rtc_handle route{};
+      CHECK(api.create_v2(&config,&network,peer_callback,&events,&route)==GB_RTC_OK);
+      struct Guard {Api& api;gb_rtc_handle handle;~Guard(){api.close(handle);}} guard{api,route};
+      CHECK(api.probe(route,20)==GB_RTC_OK);
+      unsigned directs=0, errors=0;
+      const auto collect=[&] {
+        std::lock_guard lock(events.mutex);
+        for(const auto& event:events.pending) {
+          const std::string payload(event.bytes.begin(),event.bytes.end());
+          if(event.type==GB_RTC_EVENT_ROUTE&&payload=="{\"route\":1}") ++directs;
+          if(event.type==GB_RTC_EVENT_ERROR&&payload=="{\"code\":\"direct_route_lost\"}") ++errors;
+        }
+        events.pending.clear();
+      };
+      auto deadline=GetTickCount64()+2000;
+      do {collect();if(!directs)Sleep(1);} while(!directs&&GetTickCount64()<deadline);
+      CHECK(directs==1);
+      CHECK(api.probe(route,21)==GB_RTC_OK);
+      CHECK(api.probe(route,loss)==GB_RTC_OK);
+      const uint8_t opus[]{0xf8,0xff,0xfe};
+      gb_rtc_audio packet{sizeof(packet),GB_RTC_ABI_VERSION,opus,sizeof(opus),960,{}};
+      CHECK(api.audio(route,&packet)==GB_RTC_STATE);
+      CHECK(api.probe(route,20)==GB_RTC_STATE);
+      deadline=GetTickCount64()+2000;
+      do {collect();if(!errors)Sleep(1);} while(!errors&&GetTickCount64()<deadline);
+      CHECK(errors==1&&directs==1);
+    }
+    std::puts("PASS native direct route regression is terminal across callbacks and submissions");
+    return 0;
+  }
   CHECK(connect_native_peers(api, config, network, !testing) == 0);
   gb_rtc_handle handle = 99;
   CHECK(api.create(nullptr, nullptr, nullptr, &handle) == GB_RTC_INVALID && handle == 0);

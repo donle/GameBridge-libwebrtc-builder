@@ -287,11 +287,7 @@ public:
   }
   template <class F> void Invalidate(F action) {
     std::lock_guard lock(mutex_);
-    auto state = state_.load(std::memory_order_relaxed);
-    while (state != State::Closed &&
-           !state_.compare_exchange_weak(state, State::Unproven,
-                                         std::memory_order_acq_rel)) {
-    }
+    state_.store(State::Closed, std::memory_order_release);
     action();
   }
   void Close() {
@@ -311,8 +307,9 @@ public:
       : deadline_ms_(connected_ms + TimeoutMs) {}
   DirectProofResult Observe(DirectPairEvidence evidence,
                             uint64_t now_ms) {
+    if (terminal_) return *terminal_;
     if (evidence == DirectPairEvidence::Relay)
-      return DirectProofResult::Forbidden;
+      return *(terminal_ = DirectProofResult::Forbidden);
     if (evidence == DirectPairEvidence::Direct) {
       if (proven_)
         return DirectProofResult::Stable;
@@ -323,10 +320,9 @@ public:
     }
     if (proven_) {
       proven_ = false;
-      deadline_ms_ = now_ms + TimeoutMs;
-      return DirectProofResult::Regressed;
+      return *(terminal_ = DirectProofResult::Regressed);
     }
-    return now_ms >= deadline_ms_ ? DirectProofResult::Expired
+    return now_ms >= deadline_ms_ ? *(terminal_ = DirectProofResult::Expired)
                                   : DirectProofResult::Pending;
   }
   uint64_t DeadlineMs() const { return deadline_ms_; }
@@ -334,6 +330,7 @@ public:
 private:
   uint64_t deadline_ms_;
   bool proven_{};
+  std::optional<DirectProofResult> terminal_;
 };
 
 // This TLS applies across sessions: callbacks may close each other's sessions.

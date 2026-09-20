@@ -37,6 +37,8 @@ public:
     };
     if (!direct(identity.local_type) || !direct(identity.remote_type))
       return reject(DirectPairEvidence::Unconvertible);
+    if (proven_ && *proven_ != identity)
+      return reject(DirectPairEvidence::Mismatched);
     if (state == "succeeded") {
       proven_ = identity;
       return {DirectPairEvidence::Direct, false};

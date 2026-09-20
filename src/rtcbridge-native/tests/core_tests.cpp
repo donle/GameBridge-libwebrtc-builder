@@ -77,8 +77,8 @@ int main() {
   assert(continuous.Observe(tracker.Observe(original, "failed").evidence, 4000) == DirectProofResult::Regressed);
   continuous_gate.Invalidate([] {});
   assert(!continuous_gate.Admit([] {}));
-  assert(continuous.Observe(tracker.Observe(original, "in-progress").evidence, 8999) == DirectProofResult::Pending);
-  assert(continuous.Observe(tracker.Observe(original, "in-progress").evidence, 9000) == DirectProofResult::Expired);
+  assert(continuous.Observe(tracker.Observe(original, "succeeded").evidence, 4001) == DirectProofResult::Regressed);
+  assert(!continuous_gate.Prove());
   for (unsigned field = 0; field != 5; ++field) {
     SelectedPairIdentity changed = original;
     switch (field) {
@@ -88,6 +88,7 @@ int main() {
     case 3: changed.local_type = "srflx"; break;
     case 4: changed.remote_type = "host"; break;
     }
+    tracker.Invalidate();
     assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Direct);
     assert(tracker.Observe(changed, "in-progress").evidence == DirectPairEvidence::Mismatched);
     // Regression cannot be undone by old identity plus a routine probe.
@@ -96,6 +97,7 @@ int main() {
     assert(tracker.Observe(changed, "in-progress").retained_routine_probe);
   }
   for (auto state : {"failed", "waiting", "frozen", "", "unknown"}) {
+    tracker.Invalidate();
     assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Direct);
     assert(tracker.Observe(original, state).evidence == DirectPairEvidence::Mismatched);
     assert(!tracker.Observe(original, "in-progress").retained_routine_probe);
@@ -125,8 +127,24 @@ int main() {
   DirectRouteProof changed_proof(1000);
   assert(changed_proof.Observe(tracker.Observe(original,"succeeded").evidence,2000)==DirectProofResult::Proven);
   assert(changed_proof.Observe(tracker.Observe(changed_direct,"in-progress").evidence,3000)==DirectProofResult::Regressed);
-  assert(changed_proof.Observe(tracker.Observe(changed_direct,"succeeded").evidence,3001)==DirectProofResult::Proven);
+  assert(changed_proof.Observe(tracker.Observe(changed_direct,"succeeded").evidence,3001)==DirectProofResult::Regressed);
+  for (unsigned field = 0; field != 5; ++field) {
+    auto changed = original;
+    switch (field) {
+    case 0: changed.pair = "other"; break;
+    case 1: changed.local = "other"; break;
+    case 2: changed.remote = "other"; break;
+    case 3: changed.local_type = "srflx"; break;
+    case 4: changed.remote_type = "host"; break;
+    }
+    SelectedPairTracker pinned;
+    DirectRouteProof terminal(1000);
+    assert(terminal.Observe(pinned.Observe(original, "succeeded").evidence, 2000) == DirectProofResult::Proven);
+    assert(terminal.Observe(pinned.Observe(changed, "succeeded").evidence, 2001) == DirectProofResult::Regressed);
+    assert(terminal.Observe(pinned.Observe(changed, "succeeded").evidence, 2002) == DirectProofResult::Regressed);
+  }
   for (auto state : {"succeeded", "in-progress", "failed"}) {
+    tracker.Invalidate();
     auto relay = original;
     relay.remote_type = "relay";
     DirectRouteProof relay_proof(1000);
@@ -265,10 +283,9 @@ int main() {
            DirectProofResult::Proven);
     assert(regressed.Observe(evidence, 3000) ==
            DirectProofResult::Regressed);
-    assert(regressed.Observe(evidence, 7999) ==
-           DirectProofResult::Pending);
-    assert(regressed.Observe(evidence, 8000) ==
-           DirectProofResult::Expired);
+    assert(regressed.Observe(DirectPairEvidence::Direct, 3001) ==
+           DirectProofResult::Regressed);
+    assert(regressed.Observe(evidence, 8000) == DirectProofResult::Regressed);
   }
 
   MediaQueue regression_video(1, 0), regression_audio(80, 9600);
@@ -326,9 +343,9 @@ int main() {
   outbound_continue = true;
   outbound_waiter.join();
   assert(!outbound_admitted && !outbound_sent);
-  assert(outbound_gate.Prove());
-  assert(outbound_gate.Admit([&] { outbound_sent = true; }));
-  assert(outbound_sent);
+  assert(!outbound_gate.Prove());
+  assert(!outbound_gate.Admit([&] { outbound_sent = true; }));
+  assert(!outbound_sent);
 
   // An inbound message already inside the admission boundary may finish
   // queueing before invalidation. Invalidation waits for that boundary, and no
@@ -367,9 +384,9 @@ int main() {
   assert(invalidation_finished && inbound_events == 1);
   assert(!inbound_gate.Admit([&] { ++inbound_events; }));
   assert(inbound_events == 1);
-  assert(inbound_gate.Prove());
-  assert(inbound_gate.Admit([&] { ++inbound_events; }));
-  assert(inbound_events == 2);
+  assert(!inbound_gate.Prove());
+  assert(!inbound_gate.Admit([&] { ++inbound_events; }));
+  assert(inbound_events == 1);
 
   // Terminal failure closes admission permanently. Outbound and inbound
   // operations paused after an optimistic proof check must both be denied at
