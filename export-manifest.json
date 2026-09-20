@@ -255,8 +255,8 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/src/bridge.cpp",
-                      "sha256":  "689aec0cae6774b723899b07e9f3a740cd391ab0a8c398cd1024b6a8b0603682",
-                      "bytes":  54057
+                      "sha256":  "43a2d054a3564479c6d4f07a80d4fe2b4eb72bdab28b8c6504c42de2bc0d2c94",
+                      "bytes":  54066
                   },
                   {
                       "path":  "src/rtcbridge/include/gamebridge_rtc.h",

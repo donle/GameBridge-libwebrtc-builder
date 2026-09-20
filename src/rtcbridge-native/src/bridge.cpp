@@ -581,7 +581,7 @@ public:
       };
       if (!network_.direct_only)
         return send();
-      auto result = GB_RTC_STATE;
+      gb_rtc_result result = GB_RTC_STATE;
       direct_route_gate_.Admit([&] { result = send(); });
       return result;
     });
