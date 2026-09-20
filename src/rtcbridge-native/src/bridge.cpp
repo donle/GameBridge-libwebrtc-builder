@@ -17,6 +17,7 @@
 #include "api/video_codecs/builtin_video_decoder_factory.h"
 #include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "core.h"
+#include "selected_pair.h"
 #include "json.h"
 #ifdef GB_RTC_BENCH
 #include "transport_diagnostics.h"
@@ -779,6 +780,7 @@ public:
 
           DirectPairEvidence direct_evidence = DirectPairEvidence::Missing;
 #ifdef GB_RTC_BENCH
+          bool retained_routine_probe=false;
           ProofEvidence evidence_reason=ProofEvidence::MissingSelectedPair;
           TransportSnapshot diagnostics;
           for (const auto *stats :
@@ -795,16 +797,19 @@ public:
             const auto *pair = report.GetAs<w::RTCIceCandidatePairStats>(
                 *transport->selected_candidate_pair_id);
             if (!pair || !pair->local_candidate_id ||
-                !pair->remote_candidate_id || !pair->state ||
-                *pair->state != "succeeded") {
+                !pair->remote_candidate_id) {
               direct_evidence = DirectPairEvidence::Mismatched;
 #ifdef GB_RTC_BENCH
-              evidence_reason=!pair?ProofEvidence::MissingPairRecord:
-                (!pair->local_candidate_id||!pair->remote_candidate_id)?ProofEvidence::MissingCandidateRecord:
-                ProofEvidence::PairNotSucceeded;
+              evidence_reason=!pair?ProofEvidence::MissingPairRecord:ProofEvidence::MissingCandidateRecord;
 #endif
               continue;
             }
+            // Legacy sessions retain their original succeeded-only reporting.
+            // Direct-only sessions must inspect complete candidate identities
+            // before deciding whether this is a retained routine STUN probe.
+            if (!self->network_.direct_only &&
+                (!pair->state || *pair->state != "succeeded"))
+              continue;
 #ifdef GB_RTC_BENCH
             diagnostics.AvailableOutgoingBitrate(
                 pair->available_outgoing_bitrate);
@@ -823,24 +828,21 @@ public:
 #endif
               continue;
             }
-            const auto direct = [](const std::string &type) {
-              return type == "host" || type == "srflx" || type == "prflx";
-            };
             if (self->network_.direct_only) {
-              if (*local->candidate_type == "relay" ||
-                  *remote->candidate_type == "relay") {
-                direct_evidence = DirectPairEvidence::Relay;
-                break;
-              }
-              if (direct(*local->candidate_type) &&
-                  direct(*remote->candidate_type)) {
-                direct_evidence = DirectPairEvidence::Direct;
-                break;
-              }
-              direct_evidence = DirectPairEvidence::Unconvertible;
+              const auto observed = self->selected_pair_.Observe(
+                  {*transport->selected_candidate_pair_id,
+                   *pair->local_candidate_id, *pair->remote_candidate_id,
+                   *local->candidate_type, *remote->candidate_type},
+                  pair->state ? std::string_view(*pair->state) : std::string_view{});
+              direct_evidence = observed.evidence;
 #ifdef GB_RTC_BENCH
-              evidence_reason=ProofEvidence::Other;
+              retained_routine_probe=observed.retained_routine_probe;
+              evidence_reason=direct_evidence==DirectPairEvidence::Mismatched?
+                ProofEvidence::PairNotSucceeded:ProofEvidence::Other;
 #endif
+              if (direct_evidence == DirectPairEvidence::Direct ||
+                  direct_evidence == DirectPairEvidence::Relay)
+                break;
               continue;
             }
             const bool relay = *local->candidate_type == "relay" ||
@@ -849,6 +851,16 @@ public:
                         relay ? "{\"route\":2}" : "{\"route\":1}");
           }
           if (self->network_.direct_only && self->direct_proof_) {
+            if (direct_evidence != DirectPairEvidence::Direct)
+              self->selected_pair_.Invalidate();
+#ifdef GB_RTC_BENCH
+            if (direct_evidence != DirectPairEvidence::Direct)
+              self->direct_diagnostics->SampleUnproven();
+            else if (retained_routine_probe)
+              self->direct_diagnostics->SampleRetainedRoutineProbe();
+            else
+              self->direct_diagnostics->SampleSucceeded();
+#endif
             switch (self->direct_proof_->Observe(direct_evidence,
                                                  GetTickCount64())) {
             case DirectProofResult::Proven:
@@ -1236,6 +1248,7 @@ private:
   uint64_t direct_proof_generation_{};
   std::vector<std::unique_ptr<w::IceCandidate>> early_candidates_;
   std::optional<DirectRouteProof> direct_proof_;
+  SelectedPairTracker selected_pair_;
   w::scoped_refptr<PC> pc_;
   w::scoped_refptr<w::EncodedVideoFrameInjectorInterface> video_injector_;
   w::scoped_refptr<w::EncodedAudioFrameInjectorInterface> audio_injector_;

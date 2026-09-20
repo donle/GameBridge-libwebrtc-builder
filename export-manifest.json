@@ -10,8 +10,8 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/tests/core_tests.cpp",
-                      "sha256":  "971028a5edb8e7547e9727e993eefc20e871003c762e45f99db9c99ccd83b99e",
-                      "bytes":  14590
+                      "sha256":  "4853fbc05b6b25e6b5c30b2319a38ea6e22ebe3cab981c1c529eab843f527b94",
+                      "bytes":  19857
                   },
                   {
                       "path":  "src/rtcbridge-native/tests/connection_diagnostics_tests.cpp",
@@ -54,9 +54,9 @@
                       "bytes":  2505
                   },
                   {
-                      "path":  "src/rtcbridge-native/src/network_diagnostics.h",
-                      "sha256":  "cca87bed6eeb34f7f60752df60a676c9566b9a24dd5b9a5a3e47ec38bdd3f14b",
-                      "bytes":  3377
+                      "path":  "src/rtcbridge-native/src/selected_pair.h",
+                      "sha256":  "1a3f51612fb0e5ebb61e82dce73263f4b9b703dfe8ba28f8f07734f6f36f2e7a",
+                      "bytes":  1951
                   },
                   {
                       "path":  "src/rtcbridge-native/tests/bench_diagnostics_tests.cpp",
@@ -150,13 +150,18 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/tests/network_diagnostics_tests.ps1",
-                      "sha256":  "760ce2d637a4adb7f283b5a535941711bec92299205087d4f20a91bb4216d8ec",
-                      "bytes":  2832
+                      "sha256":  "9c354e3791f5d4059a5057de891d8ce2ce10f905bc0c2634eb55080b56f9cf11",
+                      "bytes":  4236
                   },
                   {
                       "path":  "src/rtcbridge-native/tests/network_diagnostics_tests.cpp",
-                      "sha256":  "69b845695810a65c7884a4bcd5942894dc3443dbf149209564bcc9002dd12cac",
-                      "bytes":  2783
+                      "sha256":  "100e294f7cc51ada61199bab53790ec4a1aac0bdfbd1c1f6b58197519bfa2807",
+                      "bytes":  3556
+                  },
+                  {
+                      "path":  "src/rtcbridge-native/src/network_diagnostics.h",
+                      "sha256":  "a7ea9f6b36c9fc5c2e161d5b48f888b7abb070ebe31ce1b5b33cd9fca7bf207f",
+                      "bytes":  3911
                   },
                   {
                       "path":  "src/native/include/gamebridge/audio/opus_codec.h",
@@ -220,8 +225,8 @@
                   },
                   {
                       "path":  "scripts/validate-rtc-native-gate.ps1",
-                      "sha256":  "bf3cdbffe8cb8acf636a2d8838fe4fb5181b5658ac8ec16be6dfe7a4cd4ede11",
-                      "bytes":  20305
+                      "sha256":  "398956ddf8bd5b74eb852e2b6b7463668cbdeeb332198ddd621dc16f1ea3d2ae",
+                      "bytes":  21156
                   },
                   {
                       "path":  "scripts/test-rtc-native-gate.ps1",
@@ -240,7 +245,7 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/src/bench.h",
-                      "sha256":  "511cac8f23b69790fc90285526927c379ef272d7f4c0301bdb7519c1170b98ce",
+                      "sha256":  "ea74469922c9eb56366861c1ed67bcd4a8d89fe5e19ccfa227d585e452c66ccf",
                       "bytes":  5911
                   },
                   {
@@ -255,8 +260,8 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/src/bridge.cpp",
-                      "sha256":  "61ac8ef3a26743c9fd7b72041c067591f9f7a4d6010ddd9d639c9df33e46f935",
-                      "bytes":  55197
+                      "sha256":  "58a30cd86b20d88418837cd0fde46bb91617c9172623711da49f0037c1efdd8f",
+                      "bytes":  56033
                   },
                   {
                       "path":  "src/rtcbridge-native/src/json.h",
@@ -305,8 +310,8 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/network-diagnostics.md",
-                      "sha256":  "ba3459f50995c288cfe7ba37439298103213e1b2458c67d64be8a872a3ae3d78",
-                      "bytes":  2566
+                      "sha256":  "6788c757d2968d8addbb91ccfc6e0cfc0671ff3ed702d876db0f8017e2315022",
+                      "bytes":  3362
                   },
                   {
                       "path":  "src/rtcbridge-native/include/gamebridge_rtc.h",

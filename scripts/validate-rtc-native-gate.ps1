@@ -68,11 +68,13 @@ function Test-NativeRtcDiagnosticNumber($Value) {
 }
 
 # Evidence integrity is separate from Test-NativeRtcGate's unchanged acceptance
-# thresholds. Schema 1 contains fixed numeric counters only.
-function Get-NativeRtcEvidenceFields {
+# thresholds. Schema 2 adds routine-probe sample partitions; schema 1 remains
+# valid for preserved historical evidence. Both contain fixed numbers only.
+function Get-NativeRtcEvidenceFields([int]$NetworkSchema=2) {
     $fields=@('network_evidence_schema','producer_evidence_schema','fatal_producer_errors','fatal_callback_other_errors')
     foreach($source in @('video','audio','data')){foreach($result in @('attempts','ok','backpressure','state','invalid','closed','other')){$fields+="producer_${source}_$result"}}
     foreach($peer in @('sender','receiver')){
+        if($NetworkSchema-ge 2){foreach($sample in @('samples','succeeded_samples','retained_routine_probes','unproven_samples')){$fields+="native_${peer}_proof_$sample"}}
         foreach($transition in @('initial','regressions','recoveries','terminal','transitions')){$fields+="native_${peer}_proof_$transition"}
         foreach($reason in @('missing_selected_pair','missing_pair_record','missing_candidate_record','missing_candidate_type','pair_not_succeeded','relay','timeout','other')){
             $fields+="native_${peer}_regression_$reason";$fields+="native_${peer}_terminal_$reason"
@@ -81,12 +83,12 @@ function Get-NativeRtcEvidenceFields {
     $fields
 }
 function Test-NativeRtcEvidence($Report) {
-    foreach($field in ((Get-NativeRtcEvidenceFields)+@('fatal_other_errors','frames_submitted','submission_failures'))){
+    if($Report.network_evidence_schema-notin @(1,2) -or $Report.producer_evidence_schema-ne 1){throw 'Unsupported numeric network evidence schema'}
+    foreach($field in ((Get-NativeRtcEvidenceFields -NetworkSchema $Report.network_evidence_schema)+@('fatal_other_errors','frames_submitted','submission_failures'))){
         $property=$Report.PSObject.Properties[$field]
         if($null-eq $property -or !(Test-NativeRtcDiagnosticNumber $property.Value) -or
            $property.Value-lt 0 -or $property.Value-gt 9007199254740991 -or [math]::Floor($property.Value)-ne $property.Value){throw "Invalid numeric network evidence: $field"}
     }
-    if($Report.network_evidence_schema-ne 1 -or $Report.producer_evidence_schema-ne 1){throw 'Unsupported numeric network evidence schema'}
     [long]$producerFatal=0
     foreach($source in @('video','audio','data')){
         [long]$sum=0
@@ -99,6 +101,13 @@ function Test-NativeRtcEvidence($Report) {
        $producerFatal-ne $Report.fatal_producer_errors -or
        ($Report.fatal_producer_errors+$Report.fatal_callback_other_errors)-ne $Report.fatal_other_errors){throw 'Producer/frame/fatal origin partition mismatch'}
     foreach($peer in @('sender','receiver')){
+        if($Report.network_evidence_schema-eq 2){
+            $samples=$Report."native_${peer}_proof_succeeded_samples"+$Report."native_${peer}_proof_retained_routine_probes"+$Report."native_${peer}_proof_unproven_samples"
+            if($samples-ne $Report."native_${peer}_proof_samples" -or
+               ($Report."native_${peer}_proof_retained_routine_probes"-gt 0 -and $Report."native_${peer}_proof_initial"-ne 1)){
+                throw 'Direct proof sample partition mismatch'
+            }
+        }
         [long]$sum=0;foreach($transition in @('initial','regressions','recoveries','terminal')){$sum+=$Report."native_${peer}_proof_$transition"}
         if($sum-ne $Report."native_${peer}_proof_transitions" -or $Report."native_${peer}_proof_initial"-gt 1 -or
            $Report."native_${peer}_proof_terminal"-gt 1 -or $Report."native_${peer}_proof_recoveries"-gt $Report."native_${peer}_proof_regressions"){throw 'Direct proof transition partition mismatch'}

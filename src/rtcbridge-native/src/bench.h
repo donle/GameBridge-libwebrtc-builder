@@ -145,7 +145,7 @@ GB_RTC_API uint32_t GB_RTC_CALL gb_rtc_bench_evidence(uint8_t* output,uint32_t c
     std::array<std::shared_ptr<DirectDiagnostics>,2> evidence;
     {std::lock_guard lock(benchmark_mutex);evidence=benchmark_evidence;}
     if(!evidence[0]||!evidence[1])return 0;
-    std::ostringstream json;json<<"{\"network_evidence_schema\":1";
+    std::ostringstream json;json<<"{\"network_evidence_schema\":2";
     evidence[0]->Write(json,"sender");evidence[1]->Write(json,"receiver");json<<'}';
     const auto bytes=json.str();if(bytes.size()>capacity)return 0;
     std::memcpy(output,bytes.data(),bytes.size());return static_cast<uint32_t>(bytes.size());

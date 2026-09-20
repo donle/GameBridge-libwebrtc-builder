@@ -1,5 +1,5 @@
 #pragma once
-// Diagnostics schema 1. Fixed numeric counters only; never store transport IDs,
+// Network schema 2 / producer schema 1. Fixed numeric counters only; never store transport IDs,
 // addresses, SDP, payloads, credentials, or upstream strings.
 #include "gamebridge_rtc.h"
 #include <array>
@@ -46,16 +46,22 @@ struct ProducerDiagnostics {
 // Only the benchmark DLL owns these counters. Snapshot after close barriers.
 struct DirectDiagnostics {
   std::atomic<uint64_t> initial{},regressions{},recoveries{},terminal{},transitions{};
+  std::atomic<uint64_t> samples{},succeeded_samples{},retained_routine_probes{},unproven_samples{};
   std::array<std::atomic<uint64_t>,8> regression_reason{},terminal_reason{};
   std::atomic<bool> ever_proven{},terminal_seen{};
   static unsigned Index(ProofEvidence reason){const auto n=static_cast<unsigned>(reason);return n<8?n:7;}
   void Proven(){if(ever_proven.exchange(true))++recoveries;else ++initial;++transitions;}
   void Regressed(ProofEvidence reason){++regressions;++regression_reason[Index(reason)];++transitions;}
   void Terminal(ProofEvidence reason){if(terminal_seen.exchange(true))return;++terminal;++terminal_reason[Index(reason)];++transitions;}
+  void SampleSucceeded(){++samples;++succeeded_samples;}
+  void SampleRetainedRoutineProbe(){++samples;++retained_routine_probes;}
+  void SampleUnproven(){++samples;++unproven_samples;}
   void Write(std::ostream& out,const char* role)const{
     const auto field=[&](const char* name,uint64_t value){out<<",\"native_"<<role<<'_'<<name<<"\":"<<value;};
     field("proof_initial",initial.load());field("proof_regressions",regressions.load());
     field("proof_recoveries",recoveries.load());field("proof_terminal",terminal.load());field("proof_transitions",transitions.load());
+    field("proof_samples",samples.load());field("proof_succeeded_samples",succeeded_samples.load());
+    field("proof_retained_routine_probes",retained_routine_probes.load());field("proof_unproven_samples",unproven_samples.load());
     for(unsigned i=0;i<8;++i){
       out<<",\"native_"<<role<<"_regression_"<<ProofEvidenceNames[i]<<"\":"<<regression_reason[i].load();
       out<<",\"native_"<<role<<"_terminal_"<<ProofEvidenceNames[i]<<"\":"<<terminal_reason[i].load();

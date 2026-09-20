@@ -1,6 +1,10 @@
 #include "core.h"
 #include "histogram.h"
 #include "json.h"
+#if __has_include("selected_pair.h")
+#include "selected_pair.h"
+#define HAVE_SELECTED_PAIR_TRACKER 1
+#endif
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -23,6 +27,93 @@ using namespace gamebridge::rtc;
 using namespace std::chrono_literals;
 
 int main() {
+#ifndef HAVE_SELECTED_PAIR_TRACKER
+  std::cerr << "missing identity-bound routine-probe proof tracker\n";
+  return 1;
+#else
+  const SelectedPairIdentity original{"pair-a", "local-a", "remote-a", "host", "srflx"};
+  SelectedPairTracker tracker;
+  assert(tracker.Observe(original, "in-progress").evidence == DirectPairEvidence::Mismatched);
+  assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Direct);
+  const auto retained = tracker.Observe(original, "in-progress");
+  assert(retained.evidence == DirectPairEvidence::Direct && retained.retained_routine_probe);
+  assert(tracker.Observe(original, "in-progress").retained_routine_probe);
+  assert(!tracker.Observe(original, "succeeded").retained_routine_probe);
+  DirectRouteProof continuous(1000);
+  DirectRouteGate continuous_gate;
+  assert(continuous.Observe(tracker.Observe(original, "succeeded").evidence, 2000) == DirectProofResult::Proven);
+  assert(continuous_gate.Prove());
+  assert(continuous.Observe(tracker.Observe(original, "in-progress").evidence, 3000) == DirectProofResult::Stable);
+  assert(continuous_gate.Admit([] {}));
+  assert(continuous.Observe(tracker.Observe(original, "failed").evidence, 4000) == DirectProofResult::Regressed);
+  continuous_gate.Invalidate([] {});
+  assert(!continuous_gate.Admit([] {}));
+  assert(continuous.Observe(tracker.Observe(original, "in-progress").evidence, 8999) == DirectProofResult::Pending);
+  assert(continuous.Observe(tracker.Observe(original, "in-progress").evidence, 9000) == DirectProofResult::Expired);
+  for (unsigned field = 0; field != 5; ++field) {
+    SelectedPairIdentity changed = original;
+    switch (field) {
+    case 0: changed.pair = "pair-b"; break;
+    case 1: changed.local = "local-b"; break;
+    case 2: changed.remote = "remote-b"; break;
+    case 3: changed.local_type = "srflx"; break;
+    case 4: changed.remote_type = "host"; break;
+    }
+    assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Direct);
+    assert(tracker.Observe(changed, "in-progress").evidence == DirectPairEvidence::Mismatched);
+    // Regression cannot be undone by old identity plus a routine probe.
+    assert(tracker.Observe(original, "in-progress").evidence == DirectPairEvidence::Mismatched);
+    assert(tracker.Observe(changed, "succeeded").evidence == DirectPairEvidence::Direct);
+    assert(tracker.Observe(changed, "in-progress").retained_routine_probe);
+  }
+  for (auto state : {"failed", "waiting", "frozen", "", "unknown"}) {
+    assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Direct);
+    assert(tracker.Observe(original, state).evidence == DirectPairEvidence::Mismatched);
+    assert(!tracker.Observe(original, "in-progress").retained_routine_probe);
+  }
+  for (unsigned field = 0; field != 5; ++field) {
+    SelectedPairIdentity missing = original;
+    switch (field) {
+    case 0: missing.pair.clear(); break;
+    case 1: missing.local.clear(); break;
+    case 2: missing.remote.clear(); break;
+    case 3: missing.local_type.clear(); break;
+    case 4: missing.remote_type.clear(); break;
+    }
+    tracker.Observe(original, "succeeded");
+    assert(tracker.Observe(missing, "in-progress").evidence != DirectPairEvidence::Direct);
+    assert(tracker.Observe(original, "in-progress").evidence == DirectPairEvidence::Mismatched);
+    assert(tracker.Observe(missing, "succeeded").evidence != DirectPairEvidence::Direct);
+  }
+  tracker.Observe(original, "succeeded");
+  tracker.Invalidate(); // no selected pair or candidate record in a later report
+  assert(tracker.Observe(original, "in-progress").evidence == DirectPairEvidence::Mismatched);
+  auto unknown_type=original;
+  unknown_type.local_type="unknown";
+  assert(tracker.Observe(unknown_type,"succeeded").evidence==DirectPairEvidence::Unconvertible);
+  SelectedPairIdentity changed_direct=original;
+  changed_direct.pair="pair-b";
+  DirectRouteProof changed_proof(1000);
+  assert(changed_proof.Observe(tracker.Observe(original,"succeeded").evidence,2000)==DirectProofResult::Proven);
+  assert(changed_proof.Observe(tracker.Observe(changed_direct,"in-progress").evidence,3000)==DirectProofResult::Regressed);
+  assert(changed_proof.Observe(tracker.Observe(changed_direct,"succeeded").evidence,3001)==DirectProofResult::Proven);
+  for (auto state : {"succeeded", "in-progress", "failed"}) {
+    auto relay = original;
+    relay.remote_type = "relay";
+    DirectRouteProof relay_proof(1000);
+    assert(relay_proof.Observe(tracker.Observe(original, "succeeded").evidence, 2000) == DirectProofResult::Proven);
+    assert(relay_proof.Observe(tracker.Observe(relay, state).evidence, 2001) == DirectProofResult::Forbidden);
+  }
+  DirectRouteProof timeout_proof(1000);
+  tracker.Invalidate();
+  assert(timeout_proof.Observe(tracker.Observe(original, "in-progress").evidence, 6000) == DirectProofResult::Expired);
+  DirectRouteGate closed_pair_gate;
+  assert(closed_pair_gate.Prove());
+  closed_pair_gate.Close();
+  tracker.Observe(original, "succeeded");
+  assert(tracker.Observe(original, "in-progress").retained_routine_probe);
+  assert(!closed_pair_gate.Prove() && !closed_pair_gate.Admit([] {}));
+#endif
   Histogram histogram;
   for (unsigned i = 0; i < 100; ++i)
     histogram.Record(i < 95 ? 1500 : 5000);
