@@ -1,6 +1,10 @@
 #include "core.h"
 #include "histogram.h"
 #include "json.h"
+#if __has_include("receiver_payload.h")
+#include "receiver_payload.h"
+#define HAVE_RECEIVER_PADDING_POLICY 1
+#endif
 #if __has_include("selected_pair.h")
 #include "selected_pair.h"
 #define HAVE_SELECTED_PAIR_TRACKER 1
@@ -27,6 +31,31 @@ using namespace gamebridge::rtc;
 using namespace std::chrono_literals;
 
 int main() {
+#ifndef HAVE_RECEIVER_PADDING_POLICY
+  std::cerr << "missing empty audio receiver padding policy\n";
+  return 1;
+#else
+  bool receiver_failed = false;
+  unsigned delivered = 0;
+  std::vector<uint8_t> received;
+  const std::vector<uint8_t> opus_packet{0xf8, 0xff, 0xfe};
+  auto accept = [&](std::span<const uint8_t> payload) {
+    assert(!receiver_failed);
+    ++delivered;
+    received.assign(payload.begin(), payload.end());
+  };
+  auto reject = [&] { receiver_failed = true; };
+  ReceiveMediaPayload(false, {}, accept, reject);
+  assert(!receiver_failed && delivered == 0);
+  ReceiveMediaPayload(false, opus_packet, accept, reject);
+  assert(!receiver_failed && delivered == 1 && received == opus_packet);
+  std::vector<uint8_t> oversized_audio(GB_RTC_MAX_AUDIO_BYTES + 1, 1);
+  ReceiveMediaPayload(false, oversized_audio, accept, reject);
+  assert(receiver_failed && delivered == 1);
+  receiver_failed = false;
+  ReceiveMediaPayload(true, {}, accept, reject);
+  assert(receiver_failed && delivered == 1);
+#endif
 #ifndef HAVE_SELECTED_PAIR_TRACKER
   std::cerr << "missing identity-bound routine-probe proof tracker\n";
   return 1;

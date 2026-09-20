@@ -17,6 +17,7 @@
 #include "api/video_codecs/builtin_video_decoder_factory.h"
 #include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "core.h"
+#include "receiver_payload.h"
 #include "selected_pair.h"
 #include "json.h"
 #ifdef GB_RTC_BENCH
@@ -1094,27 +1095,23 @@ private:
             ++self->video_receiver_transforms;
 #endif
           const auto bytes = frame->GetData();
-          if (bytes.empty() ||
-              bytes.size() > (is_video ? GB_RTC_MAX_VIDEO_BYTES
-                                       : GB_RTC_MAX_AUDIO_BYTES)) {
-            self->Fail("event_oversize");
-            return;
-          }
+          ReceiveMediaPayload(is_video, bytes, [&](auto payload) {
           const auto time = frame->GetRtpTimestampInfo();
           if (!std::holds_alternative<w::RtpTimestampWithOffset>(time)) {
             self->Fail("media_write_failed");
             return;
           }
           auto &queue = is_video ? self->received_video : self->received_audio;
-          const auto samples = is_video ? 0 : OpusSamples(bytes);
+          const auto samples = is_video ? 0 : OpusSamples(payload);
           if (!is_video && !samples) {
             self->Fail("media_write_failed");
             return;
           }
-          if (queue.Push(bytes, std::get<w::RtpTimestampWithOffset>(time).value,
+          if (queue.Push(payload, std::get<w::RtpTimestampWithOffset>(time).value,
                          samples) == GB_RTC_BACKPRESSURE)
             ++self->receive_contention[is_video ? 0 : 1];
           self->wake_.notify_one();
+          }, [&] { self->Fail("event_oversize"); });
           // Encoded payload is the consumer output. Do not decode, play audio
           // or forward to a raw surface inside this transport-only DLL.
         }));
