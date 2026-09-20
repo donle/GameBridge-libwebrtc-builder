@@ -34,6 +34,7 @@ foreach(variant,
       defines = [ "GB_RTC_BENCH" ]
     }
     deps = [
+      "//api:candidate",
       "//api:create_peerconnection_factory",
       "//api:frame_transformer_factory",
       "//api:make_ref_counted",

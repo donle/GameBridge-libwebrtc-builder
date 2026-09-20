@@ -100,7 +100,7 @@ std::vector<Frame> fixture(const char *path) {
   return frames;
 }
 struct Api {
-  decltype(&gb_rtc_create) create{};
+  decltype(&gb_rtc_create_v2) create{};
   decltype(&gb_rtc_close) close{};
   decltype(&gb_rtc_create_offer) offer{};
   decltype(&gb_rtc_create_answer) answer{};
@@ -119,7 +119,7 @@ struct Api {
 #define LOAD(field, name)                                                      \
   field = reinterpret_cast<decltype(field)>(GetProcAddress(dll, name));        \
   require(field != nullptr, "dll_export")
-    LOAD(create, "gb_rtc_create");
+    LOAD(create, "gb_rtc_create_v2");
     LOAD(close, "gb_rtc_close");
     LOAD(offer, "gb_rtc_create_offer");
     LOAD(answer, "gb_rtc_create_answer");
@@ -180,7 +180,7 @@ struct Context {
     require(accepted.size() == seen.size(), "missing_frame_accounting");
     MissingFrames result;
     auto missing = [&](size_t index) {
-      return accepted[index] && !seen[index];
+      return !accepted[index] || !seen[index];
     };
     uint32_t run = 0;
     for (size_t i = 0; i < seen.size(); ++i) {
@@ -253,9 +253,12 @@ void __cdecl callback(void *pointer, uint32_t type, const uint8_t *data,
       return;
     }
     if (type == GB_RTC_EVENT_ROUTE) {
-      if (std::string_view(reinterpret_cast<const char *>(data), size) ==
-          "{\"route\":1}")
-        c.route = true;
+      const bool direct = data && std::string_view(reinterpret_cast<const char *>(data), size) ==
+          "{\"route\":1}";
+      const bool previously_direct = c.route.exchange(direct);
+      if (!direct && (previously_direct ||
+          (data && std::string_view(reinterpret_cast<const char *>(data), size) == "{\"route\":2}")))
+        c.RecordFatal(FatalReason::Other);
       return;
     }
     if (type == GB_RTC_EVENT_DESCRIPTION || type == GB_RTC_EVENT_CANDIDATE) {
@@ -339,8 +342,10 @@ struct Peers {
 void connect(Peers &peers) {
   const char ice[] = "{\"iceServers\":[]}";
   gb_rtc_config config{sizeof(config), 1, ice, sizeof(ice) - 1, 0};
+  gb_rtc_network_config network{sizeof(network), GB_RTC_ABI_VERSION,
+      GB_RTC_NETWORK_DIRECT_ONLY, 47981, 47990, 0, {}, {}, {}};
   for (unsigned i = 0; i < 2; ++i)
-    require(peers.api.create(&config, callback, &peers.context[i],
+    require(peers.api.create(&config, &network, callback, &peers.context[i],
                              &peers.handles[i]) == GB_RTC_OK,
             "create");
   require(peers.api.offer(peers.handles[0]) == GB_RTC_OK, "offer");
@@ -634,8 +639,9 @@ int run(int argc, char **argv) {
       << ",\"producer_max_lateness_ms\":"
       << static_cast<double>(maximumLateness) * 1000 / frequency.QuadPart
       << ",\"producer_catchup_minimum_interval_ms\":2"
-      << ",\"width\":1920,\"height\":1080,\"fps\":60,\"route\":\"direct\","
-         "\"transport\":\"C ABI/RTC/DTLS-SRTP/UDP/C "
+      << ",\"width\":1920,\"height\":1080,\"fps\":60,\"route\":\""
+      << (peers.context[0].route && peers.context[1].route ? "direct" : "unknown")
+      << "\",\"transport\":\"C ABI/RTC/DTLS-SRTP/UDP/C "
          "callback\",\"payload_validation\":\"all complete AUs matched fixture "
          "FNV-1a64\"}";
   require(bool(out), "report_write");

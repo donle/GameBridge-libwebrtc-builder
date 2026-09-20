@@ -71,7 +71,8 @@ enum { GB_RTC_GATHERING_NEW=1, GB_RTC_GATHERING_ACTIVE=2, GB_RTC_GATHERING_COMPL
 //              Optional candidate fields may be omitted. candidate="" ends
 //              that gathering generation. Forward it after earlier candidates.
 // ERROR:       {"code":"connection_failed"|"event_overflow"|
-//                      "event_oversize"|"candidate_rejected"|"description_rejected"}
+//                      "event_oversize"|"candidate_rejected"|"description_rejected"|
+//                      "relay_forbidden"|"direct_route_unproven"}
 // ROUTE:       {"route":<GB_RTC_ROUTE_*>}, from selected candidate-pair stats.
 // GATHERING:   {"state":<GB_RTC_GATHERING_*>}
 // BITRATE:     {"bitsPerSecond":1000000..40000000}, initial target 10000000.
@@ -108,6 +109,20 @@ typedef struct gb_rtc_config {
   uint32_t reserved;
 } gb_rtc_config;
 
+enum { GB_RTC_NETWORK_DIRECT_ONLY = 1u };
+
+typedef struct gb_rtc_network_config {
+  uint32_t size;
+  uint32_t abi_version;
+  uint32_t policy;
+  uint32_t udp_port_min;
+  uint32_t udp_port_max;
+  uint32_t external_ipv4_present;
+  uint8_t external_ipv4[4];
+  uint8_t reserved0[4];
+  uint64_t reserved[4];
+} gb_rtc_network_config;
+
 typedef struct gb_rtc_video {
   uint32_t size;
   uint32_t abi_version;
@@ -141,8 +156,10 @@ typedef void (GB_RTC_CALL *gb_rtc_event_cb)(void* context, uint32_t type, const 
 // Video has exactly ONE pending access unit; new input replaces that unit and
 // increments frames_dropped_bridge. Audio holds at most 200 ms (maximum 80
 // packets at 2.5 ms); overflow drops oldest whole packets and increments its
-// metric. BACKPRESSURE means brief producer-lock contention. Media submitted
-// before connection remains bounded until the connection is ready.
+// metric. BACKPRESSURE means brief producer-lock contention. For legacy
+// gb_rtc_create, media submitted before connection remains bounded until the
+// connection is ready. Direct-only gb_rtc_create_v2 SendVideo/SendAudio/
+// SendData return STATE unless a current direct selected pair is proven.
 // No asynchronous RTP pacer queue: capture cadence paces frames, GCC emits
 // bitrate targets for the native encoder. Timestamp progression uses caller
 // RTP clocks, never wall-clock sleeps or a lookahead frame.
@@ -159,6 +176,7 @@ typedef void (GB_RTC_CALL *gb_rtc_event_cb)(void* context, uint32_t type, const 
 // The Go runtime DLL must remain loaded for the lifetime of the process.
 #ifndef GB_RTC_NO_DECLARATIONS
 GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_create(const gb_rtc_config*, gb_rtc_event_cb, void*, gb_rtc_handle*);
+GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_create_v2(const gb_rtc_config*, const gb_rtc_network_config*, gb_rtc_event_cb, void*, gb_rtc_handle*);
 // Idempotent for zero/stale handles. The synchronization exception to queue
 // nonblocking behavior: external close waits for an admitted callback to end.
 // When called from ANY RTC callback, it cancels new target callbacks and returns

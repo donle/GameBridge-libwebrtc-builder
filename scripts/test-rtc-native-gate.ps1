@@ -35,6 +35,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Synthetic fixture decode failed' }
 $consumer=Join-Path $artifact 'rtc_bridge_bench.exe'
 $dll=Join-Path $artifact 'gamebridge_rtc_bench.dll'
 $stage='consumer'
+# Verify the production artifact's exact ten-export v2 ABI before benchmarking
+# the instrumented twin produced by the same attested build.
+& (Join-Path $artifact 'rtc_abi_tests.exe') (Join-Path $artifact 'gamebridge_rtc.dll') production
+if ($LASTEXITCODE -ne 0) { throw 'Native production RTC v2 ABI failed' }
 & $consumer $DurationSeconds $fixture $dll $rawResultPath
 $consumerResult=$LASTEXITCODE
 $report | Add-Member consumer_exit_code $consumerResult -Force

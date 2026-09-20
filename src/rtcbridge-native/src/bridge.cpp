@@ -5,6 +5,7 @@
 #include "api/audio/create_audio_device_module.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
+#include "api/candidate.h"
 #include "api/create_peerconnection_factory.h"
 #include "api/environment/environment_factory.h"
 #include "api/frame_transformer_factory.h"
@@ -23,6 +24,7 @@
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
 #include "rtc_base/win32_socket_init.h"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -38,6 +40,50 @@ using PC = w::PeerConnectionInterface;
 using namespace std::chrono_literals;
 class Session;
 HandleTable<Session> sessions;
+
+struct NetworkConfig {
+  bool direct_only{};
+  uint16_t udp_port_min{}, udp_port_max{};
+  bool external_ipv4_present{};
+  std::array<uint8_t, 4> external_ipv4{};
+  std::string ExternalIPv4() const {
+    return std::to_string(external_ipv4[0]) + "." +
+           std::to_string(external_ipv4[1]) + "." +
+           std::to_string(external_ipv4[2]) + "." +
+           std::to_string(external_ipv4[3]);
+  }
+};
+
+bool PublicIPv4(const std::array<uint8_t, 4> &address) {
+  const auto a = address[0], b = address[1], c = address[2];
+  return a != 0 && a != 10 && a != 127 && a < 224 &&
+         !(a == 100 && b >= 64 && b <= 127) &&
+         !(a == 169 && b == 254) && !(a == 172 && b >= 16 && b <= 31) &&
+         !(a == 192 && b == 0 && (c == 0 || c == 2)) &&
+         !(a == 192 && b == 88 && c == 99) &&
+         !(a == 192 && b == 168) &&
+         !(a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100))) &&
+         !(a == 203 && b == 0 && c == 113);
+}
+
+bool HasForbiddenSDPCandidate(std::string_view sdp) {
+  for (size_t start = 0; start < sdp.size();) {
+    const auto end = sdp.find_first_of("\r\n", start);
+    const auto line = sdp.substr(start, end - start);
+    if (line.starts_with("a=candidate:")) {
+      auto candidate =
+          w::Candidate::ParseCandidateString(std::string(line.substr(2)));
+      if (candidate.ok() && candidate.value().is_relay())
+        return true;
+    }
+    if (end == std::string_view::npos)
+      break;
+    start = sdp.find_first_not_of("\r\n", end);
+    if (start == std::string_view::npos)
+      break;
+  }
+  return false;
+}
 
 // Process-lived because DLL unloading while upstream worker threads exist is
 // unsupported. No system audio device is ever opened: encoded Opus is injected.
@@ -168,8 +214,10 @@ private:
 class Session : public w::PeerConnectionObserver,
                 public std::enable_shared_from_this<Session> {
 public:
-  Session(std::vector<IceServer> ice, gb_rtc_event_cb cb, void *context)
-      : ice_(std::move(ice)), callback_(cb), context_(context) {}
+  Session(std::vector<IceServer> ice, NetworkConfig network,
+          gb_rtc_event_cb cb, void *context)
+      : ice_(std::move(ice)), network_(std::move(network)), callback_(cb),
+        context_(context) {}
   gb_rtc_handle handle{};
   MediaQueue video{1, 0}, audio{80, 9600}, received_video{1, 0},
       received_audio{80, 9600};
@@ -205,6 +253,8 @@ public:
     Queue(GB_RTC_EVENT_BITRATE, "{\"bitsPerSecond\":10000000}");
   }
   void Close() {
+    if (network_.direct_only)
+      direct_route_gate_.Close();
     closed = true;
     callbacks.Close();
     video.Close();
@@ -248,7 +298,11 @@ public:
     peer_started_ = false;
   }
   void Fail(std::string_view code) {
-    if (closed || failed.exchange(true))
+    if (closed)
+      return;
+    if (network_.direct_only)
+      direct_route_gate_.Close();
+    if (failed.exchange(true))
       return;
     {
       std::lock_guard lock(events_mutex_);
@@ -328,7 +382,9 @@ public:
               std::to_string(pointer_drops_.load()) + "}");
   }
   void WakeMedia() {
-    if (closed || failed || !connected_ || scheduled_.exchange(true))
+    if (closed || failed || !connected_ ||
+        (network_.direct_only && !direct_route_gate_.Proven()) ||
+        scheduled_.exchange(true))
       return;
     Engine().signaling->PostTask(
         [self = shared_from_this()] { self->DrainMedia(); });
@@ -396,6 +452,10 @@ public:
         sdp.string.find("a=ice-ufrag:") == sdp.string.npos ||
         sdp.string.find("a=ice-pwd:") == sdp.string.npos)
       return GB_RTC_INVALID;
+    if (network_.direct_only && HasForbiddenSDPCandidate(sdp.string)) {
+      Fail("relay_forbidden");
+      return GB_RTC_INVALID;
+    }
     std::unique_lock lock(operation_, std::try_to_lock);
     if (!lock.owns_lock())
       return GB_RTC_BACKPRESSURE;
@@ -470,6 +530,10 @@ public:
         text.empty() ? nullptr : w::IceCandidate::Create(mid, index, text);
     if (!text.empty() && !candidate)
       return GB_RTC_INVALID;
+    if (candidate && network_.direct_only && candidate->candidate().is_relay()) {
+      Fail("relay_forbidden");
+      return GB_RTC_INVALID;
+    }
     std::unique_lock lock(operation_, std::try_to_lock);
     if (!lock.owns_lock())
       return GB_RTC_BACKPRESSURE;
@@ -496,23 +560,118 @@ public:
         });
   }
   gb_rtc_result Data(unsigned kind, std::span<const uint8_t> bytes) {
-    if (closed || failed || !connected_)
+    if (closed || failed || !connected_ ||
+        (network_.direct_only && !direct_route_gate_.Proven()))
       return GB_RTC_STATE;
     std::unique_lock lock(data_mutex_[kind - 1], std::try_to_lock);
     if (!lock.owns_lock())
       return GB_RTC_BACKPRESSURE;
     return Engine().signaling->BlockingCall([&]() -> gb_rtc_result {
-      auto channel = channels_[kind - 1];
-      if (!channel || channel->state() != w::DataChannelInterface::kOpen)
-        return GB_RTC_STATE;
-      const auto maximum = kind == 1 ? 65536u : 4096u;
-      if (channel->buffered_amount() + bytes.size() > maximum)
-        return GB_RTC_BACKPRESSURE;
-      return channel->Send(w::DataBuffer(
-                 w::CopyOnWriteBuffer(bytes.data(), bytes.size()), true))
-                 ? GB_RTC_OK
-                 : GB_RTC_BACKPRESSURE;
+      const auto send = [&]() -> gb_rtc_result {
+        auto channel = channels_[kind - 1];
+        if (!channel || channel->state() != w::DataChannelInterface::kOpen)
+          return GB_RTC_STATE;
+        const auto maximum = kind == 1 ? 65536u : 4096u;
+        if (channel->buffered_amount() + bytes.size() > maximum)
+          return GB_RTC_BACKPRESSURE;
+        return channel->Send(w::DataBuffer(
+                   w::CopyOnWriteBuffer(bytes.data(), bytes.size()), true))
+                   ? GB_RTC_OK
+                   : GB_RTC_BACKPRESSURE;
+      };
+      if (!network_.direct_only)
+        return send();
+      auto result = GB_RTC_STATE;
+      direct_route_gate_.Admit([&] { result = send(); });
+      return result;
     });
+  }
+  gb_rtc_result Video(std::span<const uint8_t> bytes, uint32_t timestamp,
+                      uint32_t width, uint32_t height, bool keyframe) {
+    gb_rtc_result result;
+    bool request_keyframe = false;
+    const auto submit = [&] {
+      const auto before = video.Dropped();
+      result = video.Push(bytes, timestamp, 0, width, height, keyframe);
+      request_keyframe = video.Dropped() != before;
+    };
+    if (network_.direct_only) {
+      switch (direct_route_gate_.TryAdmit(submit)) {
+      case DirectAdmissionResult::Busy:
+        return GB_RTC_BACKPRESSURE;
+      case DirectAdmissionResult::Denied:
+        return GB_RTC_STATE;
+      case DirectAdmissionResult::Admitted:
+        break;
+      }
+    } else {
+      submit();
+    }
+    if (request_keyframe)
+      Queue(GB_RTC_EVENT_KEYFRAME_REQUEST, "{}");
+    if (result == GB_RTC_OK)
+      WakeMedia();
+    return result;
+  }
+  gb_rtc_result Audio(std::span<const uint8_t> bytes, uint32_t timestamp,
+                      uint32_t duration) {
+    gb_rtc_result result;
+    const auto submit = [&] {
+      result = audio.Push(bytes, timestamp, duration);
+    };
+    if (network_.direct_only) {
+      switch (direct_route_gate_.TryAdmit(submit)) {
+      case DirectAdmissionResult::Busy:
+        return GB_RTC_BACKPRESSURE;
+      case DirectAdmissionResult::Denied:
+        return GB_RTC_STATE;
+      case DirectAdmissionResult::Admitted:
+        break;
+      }
+    } else {
+      submit();
+    }
+    if (result == GB_RTC_OK)
+      WakeMedia();
+    return result;
+  }
+  void QueueData(uint32_t type, std::span<const uint8_t> bytes) {
+    if (!callback_ || closed || failed)
+      return;
+    bool overflow = false, queued = false;
+    const auto enqueue = [&] {
+      std::lock_guard lock(events_mutex_);
+      if (closed || failed)
+        return;
+      Event event{type, {bytes.begin(), bytes.end()}};
+      if (type == GB_RTC_EVENT_CONTROL) {
+        if (control_.size() == 64)
+          overflow = true;
+        else {
+          control_.push_back(std::move(event));
+          queued = true;
+        }
+      } else {
+        if (latest_.contains(type))
+          ++pointer_drops_;
+        latest_.insert_or_assign(type, std::move(event));
+        queued = true;
+      }
+    };
+    bool admitted = true;
+    if (!network_.direct_only) {
+      enqueue();
+    } else {
+      admitted = direct_route_gate_.Admit(enqueue);
+    }
+    if (!admitted)
+      return;
+    if (overflow) {
+      Fail("control_overflow");
+      return;
+    }
+    if (queued)
+      wake_.notify_one();
   }
   void ChannelState(unsigned channel) {
     // The data observer cannot re-enter upstream APIs; reconcile
@@ -551,8 +710,23 @@ public:
       Queue(GB_RTC_EVENT_CANDIDATE, "{\"candidate\":\"\"}");
   }
   void OnIceCandidate(const w::IceCandidate *candidate) override {
+    if (network_.direct_only && candidate->candidate().is_relay()) {
+      Fail("relay_forbidden");
+      return;
+    }
+    std::string text = candidate->ToString();
+    if (network_.direct_only && network_.external_ipv4_present &&
+        candidate->candidate().is_local()) {
+      auto mapped = candidate->candidate();
+      mapped.set_related_address(mapped.address());
+      mapped.set_address(w::SocketAddress(network_.ExternalIPv4(),
+                                          mapped.address().port()));
+      text = w::IceCandidate(candidate->sdp_mid(), candidate->sdp_mline_index(),
+                             mapped)
+                 .ToString();
+    }
     Queue(GB_RTC_EVENT_CANDIDATE,
-          "{\"candidate\":" + JsonString(candidate->ToString()) +
+          "{\"candidate\":" + JsonString(text) +
               ",\"sdpMid\":" + JsonString(candidate->sdp_mid()) +
               ",\"sdpMLineIndex\":" +
               std::to_string(candidate->sdp_mline_index()) + "}");
@@ -572,6 +746,10 @@ public:
     if (mapped == 5)
       Fail("connection_failed");
     if (mapped == 3) {
+      if (network_.direct_only && !direct_proof_) {
+        direct_proof_.emplace(GetTickCount64());
+        ArmDirectProofDeadline();
+      }
       PollStats();
       WakeMedia();
     }
@@ -589,6 +767,8 @@ public:
           auto self = weak.lock();
           if (!self || self->closed)
             return;
+
+          DirectPairEvidence direct_evidence = DirectPairEvidence::Missing;
 #ifdef GB_RTC_BENCH
           TransportSnapshot diagnostics;
           for (const auto *stats :
@@ -605,8 +785,11 @@ public:
             const auto *pair = report.GetAs<w::RTCIceCandidatePairStats>(
                 *transport->selected_candidate_pair_id);
             if (!pair || !pair->local_candidate_id ||
-                !pair->remote_candidate_id)
+                !pair->remote_candidate_id || !pair->state ||
+                *pair->state != "succeeded") {
+              direct_evidence = DirectPairEvidence::Mismatched;
               continue;
+            }
 #ifdef GB_RTC_BENCH
             diagnostics.AvailableOutgoingBitrate(
                 pair->available_outgoing_bitrate);
@@ -616,12 +799,58 @@ public:
             const auto *remote = report.GetAs<w::RTCRemoteIceCandidateStats>(
                 *pair->remote_candidate_id);
             if (!local || !remote || !local->candidate_type ||
-                !remote->candidate_type)
+                !remote->candidate_type) {
+              direct_evidence = local && remote
+                                    ? DirectPairEvidence::Unconvertible
+                                    : DirectPairEvidence::Mismatched;
               continue;
+            }
+            const auto direct = [](const std::string &type) {
+              return type == "host" || type == "srflx" || type == "prflx";
+            };
+            if (self->network_.direct_only) {
+              if (*local->candidate_type == "relay" ||
+                  *remote->candidate_type == "relay") {
+                direct_evidence = DirectPairEvidence::Relay;
+                break;
+              }
+              if (direct(*local->candidate_type) &&
+                  direct(*remote->candidate_type)) {
+                direct_evidence = DirectPairEvidence::Direct;
+                break;
+              }
+              direct_evidence = DirectPairEvidence::Unconvertible;
+              continue;
+            }
             const bool relay = *local->candidate_type == "relay" ||
                                *remote->candidate_type == "relay";
             self->Queue(GB_RTC_EVENT_ROUTE,
                         relay ? "{\"route\":2}" : "{\"route\":1}");
+          }
+          if (self->network_.direct_only && self->direct_proof_) {
+            switch (self->direct_proof_->Observe(direct_evidence,
+                                                 GetTickCount64())) {
+            case DirectProofResult::Proven:
+              if (self->MarkDirectRouteProven()) {
+                self->Queue(GB_RTC_EVENT_ROUTE, "{\"route\":1}");
+                self->WakeMedia();
+              }
+              break;
+            case DirectProofResult::Stable:
+              break;
+            case DirectProofResult::Regressed:
+              self->LoseDirectRoute(DirectProofResult::Regressed);
+              self->ArmDirectProofDeadline();
+              break;
+            case DirectProofResult::Expired:
+              self->Fail("direct_route_unproven");
+              return;
+            case DirectProofResult::Forbidden:
+              self->Fail("relay_forbidden");
+              return;
+            case DirectProofResult::Pending:
+              break;
+            }
           }
 #ifdef GB_RTC_BENCH
           LARGE_INTEGER now{};
@@ -644,6 +873,36 @@ public:
   }
 
 private:
+  bool MarkDirectRouteProven() {
+    return direct_route_gate_.Prove();
+  }
+  void LoseDirectRoute(DirectProofResult result) {
+    DirectMediaDrops drops;
+    direct_route_gate_.Invalidate([&] {
+      drops = DiscardMediaForDirectRegression(result, video, audio);
+    });
+    if (drops.request_keyframe())
+      Queue(GB_RTC_EVENT_KEYFRAME_REQUEST, "{}");
+  }
+  void ArmDirectProofDeadline() {
+    if (!direct_proof_)
+      return;
+    const auto generation = ++direct_proof_generation_;
+    const auto deadline = direct_proof_->DeadlineMs();
+    const auto now = GetTickCount64();
+    const auto delay = deadline > now ? deadline - now : 0;
+    const auto weak = weak_from_this();
+    Engine().signaling->PostDelayedTask(
+        [weak, generation] {
+          auto self = weak.lock();
+          if (self && !self->closed && !self->failed &&
+              generation == self->direct_proof_generation_ &&
+              !self->direct_route_gate_.Proven())
+            self->Fail("direct_route_unproven");
+        },
+        w::TimeDelta::Millis(delay));
+  }
+
   bool EnsurePeer() {
     if (closed || failed)
       return false;
@@ -653,6 +912,12 @@ private:
     config.sdp_semantics = w::SdpSemantics::kUnifiedPlan;
     config.bundle_policy = PC::kBundlePolicyMaxBundle;
     config.rtcp_mux_policy = PC::kRtcpMuxPolicyRequire;
+    if (network_.direct_only) {
+      config.set_min_port(network_.udp_port_min);
+      config.set_max_port(network_.udp_port_max);
+      config.tcp_candidate_policy = PC::kTcpCandidatePolicyDisabled;
+      config.continual_gathering_policy = PC::GATHER_ONCE;
+    }
     for (const auto &server : ice_) {
       PC::IceServer value;
       value.urls = server.urls;
@@ -660,7 +925,8 @@ private:
       value.password = server.credential;
       config.servers.push_back(std::move(value));
     }
-    if (GetEnvironmentVariableW(L"GB_FORCE_RELAY", nullptr, 0))
+    if (!network_.direct_only &&
+        GetEnvironmentVariableW(L"GB_FORCE_RELAY", nullptr, 0))
       config.type = PC::kRelay;
     auto result = Engine().factory->CreatePeerConnectionOrError(
         config, w::PeerConnectionDependencies(this));
@@ -819,36 +1085,45 @@ private:
     if (closed || failed || !connected_ || !pc_)
       return;
     for (unsigned kind = 0; kind < 2; ++kind) {
-      if (inflight_[kind])
-        continue;
-      auto &queue = kind == 0 ? video : audio;
-      auto media = queue.Pop();
-      if (!media)
-        continue;
-      inflight_[kind] = true;
-      inflight_timestamp_[kind] = media->timestamp;
-      if (kind == 0) {
+      const auto drain = [&] {
+        if (inflight_[kind])
+          return;
+        auto &queue = kind == 0 ? video : audio;
+        auto media = queue.Pop();
+        if (!media)
+          return;
+        inflight_[kind] = true;
+        inflight_timestamp_[kind] = media->timestamp;
+        if (kind == 0) {
 #ifdef GB_RTC_BENCH
-        ++video_injections;
+          ++video_injections;
 #endif
-        if (dequeue_observer)
-          dequeue_observer(media->timestamp);
-        auto frame = w::CreateOutgoingVideoFrame(
-            media->key ? w::VideoFrameType::kVideoFrameKey
-                       : w::VideoFrameType::kVideoFrameDelta,
-            w::PayloadType(102), media->timestamp, media->bytes,
-            GetTickCount64(), {}, w::kVideoCodecH264, std::nullopt,
-            uint16_t(media->width), uint16_t(media->height));
-        video_injector_->InjectFrame(std::move(frame));
+          if (dequeue_observer)
+            dequeue_observer(media->timestamp);
+          auto frame = w::CreateOutgoingVideoFrame(
+              media->key ? w::VideoFrameType::kVideoFrameKey
+                         : w::VideoFrameType::kVideoFrameDelta,
+              w::PayloadType(102), media->timestamp, media->bytes,
+              GetTickCount64(), {}, w::kVideoCodecH264, std::nullopt,
+              uint16_t(media->width), uint16_t(media->height));
+          video_injector_->InjectFrame(std::move(frame));
+        } else {
+          auto frame = w::CreateOutgoingAudioFrame(
+              w::TransformableAudioFrameInterface::FrameType::
+                  kAudioFrameSpeech,
+              w::PayloadType(111), media->timestamp, media->bytes.data(),
+              media->bytes.size(), std::nullopt, 0, {}, "audio/opus",
+              std::nullopt, std::nullopt);
+          audio_injector_->InjectFrame(std::move(frame));
+        }
+        queue.Recycle(std::move(*media));
+      };
+      if (network_.direct_only) {
+        if (!direct_route_gate_.Admit(drain))
+          return;
       } else {
-        auto frame = w::CreateOutgoingAudioFrame(
-            w::TransformableAudioFrameInterface::FrameType::kAudioFrameSpeech,
-            w::PayloadType(111), media->timestamp, media->bytes.data(),
-            media->bytes.size(), std::nullopt, 0, {}, "audio/opus",
-            std::nullopt, std::nullopt);
-        audio_injector_->InjectFrame(std::move(frame));
+        drain();
       }
-      queue.Recycle(std::move(*media));
     }
   }
   void Dispatch() {
@@ -883,7 +1158,8 @@ private:
           callback_(context_, event->type, event->bytes.data(),
                     uint32_t(event->bytes.size()));
         });
-      if (!failed) {
+      if (!failed &&
+          (!network_.direct_only || direct_route_gate_.Proven())) {
         DeliverMedia(received_video, GB_RTC_EVENT_VIDEO);
         DeliverMedia(received_audio, GB_RTC_EVENT_AUDIO);
       }
@@ -915,6 +1191,7 @@ private:
     queue.Recycle(std::move(*frame));
   }
   std::vector<IceServer> ice_;
+  NetworkConfig network_;
   gb_rtc_event_cb callback_;
   void *context_;
   std::mutex operation_, stop_mutex_, events_mutex_, data_mutex_[2];
@@ -927,8 +1204,11 @@ private:
   bool dispatcher_done_{}, remote_set_{};
   std::atomic<bool> peer_started_{}, connected_{}, scheduled_{}, inflight_[2]{},
       cleanup_scheduled_{};
+  DirectRouteGate direct_route_gate_;
   std::atomic<uint32_t> inflight_timestamp_[2]{};
+  uint64_t direct_proof_generation_{};
   std::vector<std::unique_ptr<w::IceCandidate>> early_candidates_;
+  std::optional<DirectRouteProof> direct_proof_;
   w::scoped_refptr<PC> pc_;
   w::scoped_refptr<w::EncodedVideoFrameInjectorInterface> video_injector_;
   w::scoped_refptr<w::EncodedAudioFrameInjectorInterface> audio_injector_;
@@ -949,8 +1229,9 @@ void ChannelObserver::OnMessage(const w::DataBuffer &buffer) {
     owner->Fail("channel_failed");
     return;
   }
-  owner->Queue(channel_ == 0 ? GB_RTC_EVENT_CONTROL : GB_RTC_EVENT_POINTER,
-               std::span(buffer.data.data(), buffer.data.size()));
+  owner->QueueData(channel_ == 0 ? GB_RTC_EVENT_CONTROL
+                                 : GB_RTC_EVENT_POINTER,
+                   std::span(buffer.data.data(), buffer.data.size()));
 }
 } // namespace gamebridge::rtc
 
@@ -962,6 +1243,34 @@ template <class F> gb_rtc_result Boundary(F &&action) noexcept {
     return GB_RTC_INTERNAL;
   }
 }
+gb_rtc_result CreateSession(const gb_rtc_config *config, NetworkConfig network,
+                            gb_rtc_event_cb callback, void *context,
+                            gb_rtc_handle *handle) {
+  if (!handle || !config || config->size != sizeof(*config) ||
+      config->abi_version != 1 || config->reserved ||
+      !config->ice_json_utf8 || !config->ice_json_size ||
+      config->ice_json_size > GB_RTC_MAX_ICE_BYTES)
+    return GB_RTC_INVALID;
+  auto ice =
+      ParseIce(std::string_view(config->ice_json_utf8, config->ice_json_size));
+  if (!ice || (network.direct_only && !ice->empty()))
+    return GB_RTC_INVALID;
+  auto session = std::make_shared<Session>(std::move(*ice), std::move(network),
+                                           callback, context);
+  auto value = sessions.Insert(session);
+  if (!value)
+    return GB_RTC_BACKPRESSURE;
+  session->handle = value;
+  *handle = value;
+  try {
+    session->StartCallbacks();
+  } catch (...) {
+    sessions.Erase(value);
+    *handle = 0;
+    return GB_RTC_INTERNAL;
+  }
+  return GB_RTC_OK;
+}
 extern "C" {
 GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_create(const gb_rtc_config *config,
                                                    gb_rtc_event_cb callback,
@@ -969,31 +1278,42 @@ GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_create(const gb_rtc_config *config,
                                                    gb_rtc_handle *handle) {
   if (handle)
     *handle = 0;
+  return Boundary(
+      [&] { return CreateSession(config, NetworkConfig{}, callback, context, handle); });
+}
+GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_create_v2(
+    const gb_rtc_config *config, const gb_rtc_network_config *network,
+    gb_rtc_event_cb callback, void *context, gb_rtc_handle *handle) {
+  if (handle)
+    *handle = 0;
   return Boundary([&]() -> gb_rtc_result {
-    if (!handle || !config || config->size != sizeof(*config) ||
-        config->abi_version != 1 || config->reserved ||
-        !config->ice_json_utf8 || !config->ice_json_size ||
-        config->ice_json_size > GB_RTC_MAX_ICE_BYTES)
+    if (!handle || !network || network->size != sizeof(*network) ||
+        network->abi_version != GB_RTC_ABI_VERSION ||
+        (network->policy & ~GB_RTC_NETWORK_DIRECT_ONLY) ||
+        network->external_ipv4_present > 1)
       return GB_RTC_INVALID;
-    auto ice = ParseIce(
-        std::string_view(config->ice_json_utf8, config->ice_json_size));
-    if (!ice)
+    for (auto value : network->reserved0)
+      if (value)
+        return GB_RTC_INVALID;
+    for (auto value : network->reserved)
+      if (value)
+        return GB_RTC_INVALID;
+    NetworkConfig parsed;
+    parsed.direct_only =
+        (network->policy & GB_RTC_NETWORK_DIRECT_ONLY) != 0;
+    if (parsed.direct_only &&
+        (network->udp_port_min != 47981 || network->udp_port_max != 47990))
       return GB_RTC_INVALID;
-    auto session =
-        std::make_shared<Session>(std::move(*ice), callback, context);
-    auto value = sessions.Insert(session);
-    if (!value)
-      return GB_RTC_BACKPRESSURE;
-    session->handle = value;
-    *handle = value;
-    try {
-      session->StartCallbacks();
-    } catch (...) {
-      sessions.Erase(value);
-      *handle = 0;
-      return GB_RTC_INTERNAL;
-    }
-    return GB_RTC_OK;
+    parsed.udp_port_min = static_cast<uint16_t>(network->udp_port_min);
+    parsed.udp_port_max = static_cast<uint16_t>(network->udp_port_max);
+    parsed.external_ipv4_present = network->external_ipv4_present != 0;
+    parsed.external_ipv4 = {network->external_ipv4[0],
+                            network->external_ipv4[1],
+                            network->external_ipv4[2],
+                            network->external_ipv4[3]};
+    if (parsed.external_ipv4_present && !PublicIPv4(parsed.external_ipv4))
+      return GB_RTC_INVALID;
+    return CreateSession(config, std::move(parsed), callback, context, handle);
   });
 }
 GB_RTC_API void GB_RTC_CALL gb_rtc_close(gb_rtc_handle handle) {
@@ -1061,14 +1381,8 @@ gb_rtc_send_video(gb_rtc_handle handle, const gb_rtc_video *input) {
     const std::span bytes(input->data, input->data_size);
     if (!ValidAnnexB(bytes))
       return GB_RTC_INVALID;
-    const auto before = s->video.Dropped();
-    auto result = s->video.Push(bytes, input->timestamp90k, 0, input->width,
-                                input->height, input->keyframe != 0);
-    if (s->video.Dropped() != before)
-      s->Queue(GB_RTC_EVENT_KEYFRAME_REQUEST, "{}");
-    if (result == GB_RTC_OK)
-      s->WakeMedia();
-    return result;
+    return s->Video(bytes, input->timestamp90k, input->width, input->height,
+                    input->keyframe != 0);
   });
 }
 GB_RTC_API gb_rtc_result GB_RTC_CALL
@@ -1086,10 +1400,7 @@ gb_rtc_send_audio(gb_rtc_handle handle, const gb_rtc_audio *input) {
     auto duration = OpusSamples(bytes);
     if (!duration)
       return GB_RTC_INVALID;
-    auto result = s->audio.Push(bytes, input->timestamp48k, duration);
-    if (result == GB_RTC_OK)
-      s->WakeMedia();
-    return result;
+    return s->Audio(bytes, input->timestamp48k, duration);
   });
 }
 GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_send_data(gb_rtc_handle handle,

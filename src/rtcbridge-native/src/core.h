@@ -119,6 +119,17 @@ public:
     std::lock_guard lock(mutex_);
     RecycleUnlocked(std::move(item));
   }
+  uint64_t DiscardPending() {
+    std::lock_guard lock(mutex_);
+    const auto discarded = uint64_t(pending_.size());
+    while (!pending_.empty()) {
+      RecycleUnlocked(std::move(pending_.front()));
+      pending_.pop_front();
+    }
+    duration_ = 0;
+    dropped_.fetch_add(discarded, std::memory_order_relaxed);
+    return discarded;
+  }
   void Close() {
     std::lock_guard lock(mutex_);
     closed_ = true;
@@ -211,6 +222,119 @@ inline bool ValidAnnexB(std::span<const uint8_t> bytes) {
     position = next + 3;
   }
 }
+
+enum class DirectPairEvidence {
+  Missing,
+  Unconvertible,
+  Mismatched,
+  Direct,
+  Relay,
+};
+
+inline bool DirectTrafficAllowed(bool direct_only, bool direct_proven) {
+  return !direct_only || direct_proven;
+}
+
+enum class DirectProofResult {
+  Pending,
+  Proven,
+  Stable,
+  Regressed,
+  Expired,
+  Forbidden,
+};
+
+struct DirectMediaDrops {
+  uint64_t video{}, audio{};
+  bool request_keyframe() const { return video != 0; }
+};
+
+inline DirectMediaDrops
+DiscardMediaForDirectRegression(DirectProofResult result, MediaQueue &video,
+                                MediaQueue &audio) {
+  if (result != DirectProofResult::Regressed)
+    return {};
+  return {video.DiscardPending(), audio.DiscardPending()};
+}
+
+enum class DirectAdmissionResult { Admitted, Denied, Busy };
+
+class DirectRouteGate {
+public:
+  bool Proven() const {
+    return state_.load(std::memory_order_acquire) == State::Proven;
+  }
+  bool Prove() {
+    auto expected = State::Unproven;
+    return state_.compare_exchange_strong(expected, State::Proven,
+                                          std::memory_order_acq_rel);
+  }
+  template <class F> bool Admit(F action) {
+    std::lock_guard lock(mutex_);
+    if (state_.load(std::memory_order_relaxed) != State::Proven)
+      return false;
+    action();
+    return true;
+  }
+  template <class F> DirectAdmissionResult TryAdmit(F action) {
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock())
+      return DirectAdmissionResult::Busy;
+    if (state_.load(std::memory_order_relaxed) != State::Proven)
+      return DirectAdmissionResult::Denied;
+    action();
+    return DirectAdmissionResult::Admitted;
+  }
+  template <class F> void Invalidate(F action) {
+    std::lock_guard lock(mutex_);
+    auto state = state_.load(std::memory_order_relaxed);
+    while (state != State::Closed &&
+           !state_.compare_exchange_weak(state, State::Unproven,
+                                         std::memory_order_acq_rel)) {
+    }
+    action();
+  }
+  void Close() {
+    state_.store(State::Closed, std::memory_order_release);
+  }
+
+private:
+  enum class State : uint8_t { Unproven, Proven, Closed };
+  std::atomic<State> state_{State::Unproven};
+  std::mutex mutex_;
+};
+
+class DirectRouteProof {
+public:
+  static constexpr uint64_t TimeoutMs = 5000;
+  explicit DirectRouteProof(uint64_t connected_ms)
+      : deadline_ms_(connected_ms + TimeoutMs) {}
+  DirectProofResult Observe(DirectPairEvidence evidence,
+                            uint64_t now_ms) {
+    if (evidence == DirectPairEvidence::Relay)
+      return DirectProofResult::Forbidden;
+    if (evidence == DirectPairEvidence::Direct) {
+      if (proven_)
+        return DirectProofResult::Stable;
+      if (now_ms < deadline_ms_) {
+        proven_ = true;
+        return DirectProofResult::Proven;
+      }
+    }
+    if (proven_) {
+      proven_ = false;
+      deadline_ms_ = now_ms + TimeoutMs;
+      return DirectProofResult::Regressed;
+    }
+    return now_ms >= deadline_ms_ ? DirectProofResult::Expired
+                                  : DirectProofResult::Pending;
+  }
+  uint64_t DeadlineMs() const { return deadline_ms_; }
+
+private:
+  uint64_t deadline_ms_;
+  bool proven_{};
+};
 
 // This TLS applies across sessions: callbacks may close each other's sessions.
 inline thread_local unsigned callback_depth = 0;

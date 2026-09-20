@@ -32,7 +32,7 @@ jobs:
         run: ./src/rtcbridge-native/tests/ci_depot_environment_tests.ps1
       - name: Validate required license package contents
         run: ./src/rtcbridge-native/tests/license_package_tests.ps1
-      - name: Validate gate failures and sanitized diagnostics
+      - name: Validate direct-only gate failures and sanitized diagnostics
         run: |
           ./src/rtcbridge-native/tests/gate_tests.ps1
           ./src/rtcbridge-native/tests/gate_diagnostic_tests.ps1

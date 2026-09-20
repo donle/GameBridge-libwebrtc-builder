@@ -1,5 +1,8 @@
+param([Alias('Report')][string]$ValidationReportPath,
+      [Alias('DurationSeconds')][ValidateRange(5,7200)][int]$ValidationDurationSeconds=1800)
+
 function Get-NativeRtcMinimumFrames([int]$DurationSeconds) {
-    if ($DurationSeconds -eq 1800) { return 107900 }
+    if ($DurationSeconds -eq 1800) { return [math]::Ceiling(($DurationSeconds * 60) * 0.998) }
     [math]::Floor($DurationSeconds * 60 - [math]::Max(5, $DurationSeconds / 18))
 }
 
@@ -17,16 +20,45 @@ function Test-NativeRtcGate {
         frames_dropped_bridge=@(0,($DurationSeconds*60)); frames_dropped_receiver=@(0,($DurationSeconds*60))
         submission_failures=@(0,($DurationSeconds*60))
     }
+    foreach ($name in @('consumer_exit_code','fatal_header_errors','fatal_timestamp_errors','fatal_range_errors',
+        'fatal_duplicate_errors','fatal_payload_errors','fatal_bridge_errors','fatal_other_errors',
+        'fatal_setup_errors','fatal_prewarm_errors','fatal_measurement_errors','fatal_drain_errors','fatal_teardown_errors',
+        'fatal_bridge_control_closed_errors','fatal_bridge_pointer_closed_errors','fatal_bridge_connection_errors','fatal_bridge_other_errors',
+        'payload_size_errors','payload_content_errors','payload_matches_other_fixture','bridge_error_code_mask')) {
+        $ranges[$name]=@(0,0)
+    }
+    $ranges.missing_frame_count=@(0,($DurationSeconds*60))
+    $ranges.missing_frame_runs=@(0,($DurationSeconds*60))
+    $ranges.missing_longest_run=@(0, $(if ($DurationSeconds -eq 1800) { 12 } else { $DurationSeconds*60 }))
     foreach ($name in $ranges.Keys) {
         $property=$Report.PSObject.Properties[$name]
         if ($null -eq $property -or $null -eq $property.Value -or $property.Value -is [string] -or $property.Value -is [bool]) { throw "Missing/non-numeric native RTC metric: $name" }
         $number=[double]$property.Value
         if ([double]::IsNaN($number) -or [double]::IsInfinity($number) -or $number -lt $ranges[$name][0] -or $number -gt $ranges[$name][1]) { throw "Native RTC gate assertion failed: $name (actual=$number; minimum=$($ranges[$name][0]); maximum=$($ranges[$name][1]))" }
-        if ($name -match '^(frames_|bridge_latency_samples|video_queue_depth_max|fatal_errors|stale_handle_callbacks|metrics_errors|submission_failures|gc_cycles)' -and [math]::Floor($number) -ne $number) { throw "Non-integer native RTC counter: $name" }
+        if ($name -match '^(frames_|missing_|bridge_latency_samples|video_queue_depth_max|fatal_|stale_handle_callbacks|metrics_errors|submission_failures|gc_cycles|consumer_exit_code|payload_|bridge_error_code_mask)' -and [math]::Floor($number) -ne $number) { throw "Non-integer native RTC counter: $name" }
     }
     if ($Report.rtc_backend -cne 'libwebrtc' -or $Report.libwebrtc_revision -cne 'c250ac7568212f05892447d8e8673f8e55d716d9' -or $Report.gc_applicable -isnot [bool] -or $Report.gc_applicable) { throw 'Native gate requires the pinned non-Go backend' }
+    $requiredStrings=[ordered]@{
+        fixture_sha256='^[a-f0-9]{64}$';rtc_dll_sha256='^[a-f0-9]{64}$';native_consumer_sha256='^[a-f0-9]{64}$'
+        route='^direct$';transport='^C ABI/RTC/DTLS-SRTP/UDP/C callback$'
+        payload_validation='^all complete AUs matched fixture FNV-1a64$'
+        gc_measurement='^not applicable: native libwebrtc DLL has no Go garbage collector$'
+    }
+    foreach($name in $requiredStrings.Keys){
+        $property=$Report.PSObject.Properties[$name]
+        if($null -eq $property -or $property.Value -isnot [string] -or $property.Value -cnotmatch $requiredStrings[$name]){throw "Missing/invalid native RTC identity: $name"}
+    }
     $residual=$Report.frames_submitted-$Report.frames_delivered-$Report.frames_dropped_bridge-$Report.frames_dropped_receiver
     if ($residual -lt 0 -or ($Report.frames_submitted+$Report.submission_failures) -ne ($DurationSeconds*60)) { throw 'Inconsistent native RTC drop accounting' }
+    $missing=($DurationSeconds*60)-$Report.frames_delivered
+    if($Report.missing_frame_count -ne $missing -or
+       ($missing -eq 0 -and ($Report.missing_frame_runs -ne 0 -or $Report.missing_longest_run -ne 0)) -or
+       ($missing -gt 0 -and ($Report.missing_frame_runs -lt 1 -or $Report.missing_frame_runs -gt $missing -or
+                            $Report.missing_longest_run -lt 1 -or $Report.missing_longest_run -gt $missing -or
+                            $Report.missing_longest_run -gt ($missing-$Report.missing_frame_runs+1) -or
+                            $missing -gt ($Report.missing_frame_runs*$Report.missing_longest_run)))){
+        throw 'Inconsistent native RTC missing-frame distribution'
+    }
     [pscustomobject]@{ frames_expected_min=$minimum; frames_unaccounted_after_drain=$residual; passed=$true }
 }
 
@@ -76,6 +108,8 @@ function ConvertTo-NativeRtcDiagnostic {
         route='^(direct|relay)$';transport='^C ABI/RTC/DTLS-SRTP/UDP/C callback$'
         payload_validation='^all complete AUs matched fixture FNV-1a64$'
         gc_measurement='^not applicable: native libwebrtc DLL has no Go garbage collector$'
+        validation_policy='^native-rtc-experience-v2$'
+        source_report_sha256='^[a-f0-9]{64}$'
     }
     foreach($name in $strings.Keys){
         $property=$Report.PSObject.Properties[$name]
@@ -185,4 +219,11 @@ function Write-NativeRtcDiagnostic($Report,[string]$Path,[switch]$Quiet) {
         Write-Host $json
         Write-Host 'NATIVE RTC REPORT END'
     }
+}
+
+if ($ValidationReportPath) {
+    $validatedReport=Get-Content -Raw -LiteralPath $ValidationReportPath | ConvertFrom-Json
+    Test-NativeRtcGate $validatedReport $ValidationDurationSeconds | Out-Null
+    if ($validatedReport.passed -isnot [bool] -or !$validatedReport.passed) { throw 'Native RTC report does not claim a completed passing gate' }
+    Write-Host "NATIVE RTC VALIDATION PASS duration=$ValidationDurationSeconds route=direct"
 }

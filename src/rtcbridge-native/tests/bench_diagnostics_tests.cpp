@@ -157,10 +157,11 @@ template <class C> void MissingDistribution() {
     Check(missing.samples == 7 && missing.indices[0] == 0 &&
               missing.indices[6] == 11 && missing.omitted == 0,
           "missing sample indices must be sorted measurement-relative values");
-    accepted[4] = 0;
+    accepted[2] = 0;
     missing = c.SummarizeMissing(accepted);
-    Check(missing.total == 6 && missing.interior == 1,
-          "submission failures must not become transport missing frames");
+    Check(missing.total == 8 && missing.head == 3 && missing.interior == 2 &&
+              missing.runs == 3 && missing.longest == 3,
+          "submission failures must extend the user-visible missing run");
     c.seen.assign(100, 0);
     accepted.assign(100, 1);
     missing = c.SummarizeMissing(accepted);
@@ -179,6 +180,20 @@ template <class C> void MissingDistribution() {
 }
 int main() {
   try {
+    Context route;
+    const auto deliver_route = [&](const char* json) {
+      callback(&route, GB_RTC_EVENT_ROUTE, reinterpret_cast<const uint8_t*>(json),
+               static_cast<uint32_t>(std::strlen(json)));
+    };
+    deliver_route("{\"route\":1}");
+    Check(route.route, "direct proof must admit the benchmark");
+    deliver_route("{\"route\":0}");
+    Check(!route.route && route.fatal == 1,
+          "loss of direct proof must revoke admission and fail qualification");
+    deliver_route("{\"route\":1}");
+    deliver_route("{\"route\":2}");
+    Check(!route.route && route.fatal == 2,
+          "selected relay must revoke direct proof and fail qualification");
     ReasonsAndPhases<Context>();
     MissingDistribution<Context>();
     std::puts("RTC consumer diagnostics: actual callback reasons, phases, "

@@ -5,6 +5,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <thread>
 
@@ -105,6 +106,197 @@ int main() {
       !ValidAnnexB(oversized)); // normalization adds a fourth start-code byte
   assert(!ValidAnnexB(std::vector<uint8_t>{0, 0, 0, 0, 1, 0x65}));
   assert(!ValidAnnexB(std::vector<uint8_t>{0, 0, 1, 9})); // no deliverable NAL
+
+  assert(DirectTrafficAllowed(false, false));
+  assert(!DirectTrafficAllowed(true, false));
+  assert(DirectTrafficAllowed(true, true));
+
+  DirectRouteProof missing(1000);
+  assert(missing.Observe(DirectPairEvidence::Missing, 5999) ==
+         DirectProofResult::Pending);
+  DirectRouteProof unconvertible(1000);
+  assert(unconvertible.Observe(DirectPairEvidence::Unconvertible, 5999) ==
+         DirectProofResult::Pending);
+  DirectRouteProof mismatched(1000);
+  assert(mismatched.Observe(DirectPairEvidence::Mismatched, 5999) ==
+         DirectProofResult::Pending);
+  assert(missing.Observe(DirectPairEvidence::Missing, 6000) ==
+         DirectProofResult::Expired);
+  DirectRouteProof proven(1000);
+  assert(proven.Observe(DirectPairEvidence::Direct, 5999) ==
+         DirectProofResult::Proven);
+
+  // A later selected-pair record with different IDs but direct candidate
+  // types is still complete direct evidence.
+  assert(proven.Observe(DirectPairEvidence::Direct, 6000) ==
+         DirectProofResult::Stable);
+
+  DirectRouteProof relayed(1000);
+  assert(relayed.Observe(DirectPairEvidence::Direct, 2000) ==
+         DirectProofResult::Proven);
+  assert(relayed.Observe(DirectPairEvidence::Relay, 2001) ==
+         DirectProofResult::Forbidden);
+
+  for (auto evidence : {DirectPairEvidence::Missing,
+                        DirectPairEvidence::Unconvertible,
+                        DirectPairEvidence::Mismatched}) {
+    DirectRouteProof regressed(1000);
+    assert(regressed.Observe(DirectPairEvidence::Direct, 2000) ==
+           DirectProofResult::Proven);
+    assert(regressed.Observe(evidence, 3000) ==
+           DirectProofResult::Regressed);
+    assert(regressed.Observe(evidence, 7999) ==
+           DirectProofResult::Pending);
+    assert(regressed.Observe(evidence, 8000) ==
+           DirectProofResult::Expired);
+  }
+
+  MediaQueue regression_video(1, 0), regression_audio(80, 9600);
+  assert(regression_video.Push(bytes, 10, 0) == GB_RTC_OK);
+  assert(regression_audio.Push(bytes, 10, 120) == GB_RTC_OK);
+  assert(regression_audio.Push(bytes, 11, 120) == GB_RTC_OK);
+  auto regression_drops = DiscardMediaForDirectRegression(
+      DirectProofResult::Regressed, regression_video, regression_audio);
+  assert(regression_drops.video == 1 && regression_drops.audio == 2);
+  assert(regression_drops.request_keyframe());
+  assert(regression_video.Dropped() == 1 && regression_audio.Dropped() == 2);
+  assert(!regression_video.Pop() && !regression_audio.Pop());
+
+  // Repeated unproven observations carry no stale media and must not create a
+  // keyframe-request storm.
+  auto repeated_drops = DiscardMediaForDirectRegression(
+      DirectProofResult::Pending, regression_video, regression_audio);
+  assert(repeated_drops.video == 0 && repeated_drops.audio == 0);
+  assert(!repeated_drops.request_keyframe());
+
+  // A different complete direct pair remains stable and must retain valid
+  // media queued under the continuously proven route.
+  assert(regression_video.Push(bytes, 12, 0) == GB_RTC_OK);
+  auto direct_change_drops = DiscardMediaForDirectRegression(
+      DirectProofResult::Stable, regression_video, regression_audio);
+  assert(direct_change_drops.video == 0 &&
+         !direct_change_drops.request_keyframe());
+  assert(regression_video.Pop()->timestamp == 12);
+
+  // Audio-only regression updates exact metrics without requesting a video
+  // recovery frame.
+  assert(regression_audio.Push(bytes, 13, 120) == GB_RTC_OK);
+  auto audio_only_drops = DiscardMediaForDirectRegression(
+      DirectProofResult::Regressed, regression_video, regression_audio);
+  assert(audio_only_drops.video == 0 && audio_only_drops.audio == 1);
+  assert(!audio_only_drops.request_keyframe());
+
+  // Outbound data may wait for the signaling thread after an optimistic
+  // caller-side check. The effect-point admission must observe an intervening
+  // invalidation, then recover after a new direct proof.
+  DirectRouteGate outbound_gate;
+  assert(outbound_gate.Prove());
+  std::atomic<bool> outbound_checked{}, outbound_continue{}, outbound_sent{},
+      outbound_admitted{};
+  std::thread outbound_waiter([&] {
+    assert(outbound_gate.Proven());
+    outbound_checked = true;
+    while (!outbound_continue)
+      std::this_thread::yield();
+    outbound_admitted = outbound_gate.Admit([&] { outbound_sent = true; });
+  });
+  while (!outbound_checked)
+    std::this_thread::yield();
+  outbound_gate.Invalidate([] {});
+  outbound_continue = true;
+  outbound_waiter.join();
+  assert(!outbound_admitted && !outbound_sent);
+  assert(outbound_gate.Prove());
+  assert(outbound_gate.Admit([&] { outbound_sent = true; }));
+  assert(outbound_sent);
+
+  // An inbound message already inside the admission boundary may finish
+  // queueing before invalidation. Invalidation waits for that boundary, and no
+  // later event is queued until recovery.
+  DirectRouteGate inbound_gate;
+  assert(inbound_gate.Prove());
+  std::atomic<bool> inbound_entered{}, inbound_release{}, invalidation_started{},
+      invalidation_finished{};
+  std::atomic<unsigned> inbound_events{};
+  std::thread inbound_admitted([&] {
+    assert(inbound_gate.Admit([&] {
+      inbound_entered = true;
+      while (!inbound_release)
+        std::this_thread::yield();
+      ++inbound_events;
+    }));
+  });
+  while (!inbound_entered)
+    std::this_thread::yield();
+  assert(inbound_gate.TryAdmit([&] { ++inbound_events; }) ==
+         DirectAdmissionResult::Busy);
+  assert(inbound_events == 0);
+  std::thread inbound_invalidator([&] {
+    invalidation_started = true;
+    inbound_gate.Invalidate([] {});
+    invalidation_finished = true;
+  });
+  while (!invalidation_started)
+    std::this_thread::yield();
+  for (unsigned i = 0; i < 1000 && !invalidation_finished; ++i)
+    std::this_thread::yield();
+  assert(!invalidation_finished);
+  inbound_release = true;
+  inbound_admitted.join();
+  inbound_invalidator.join();
+  assert(invalidation_finished && inbound_events == 1);
+  assert(!inbound_gate.Admit([&] { ++inbound_events; }));
+  assert(inbound_events == 1);
+  assert(inbound_gate.Prove());
+  assert(inbound_gate.Admit([&] { ++inbound_events; }));
+  assert(inbound_events == 2);
+
+  // Terminal failure closes admission permanently. Outbound and inbound
+  // operations paused after an optimistic proof check must both be denied at
+  // their effect points, and a later proof cannot reopen the gate.
+  DirectRouteGate terminal_gate;
+  assert(terminal_gate.Prove());
+  std::atomic<unsigned> terminal_checked{}, terminal_effects{};
+  std::atomic<bool> terminal_continue{}, terminal_outbound_admitted{},
+      terminal_inbound_admitted{};
+  const auto terminal_waiter = [&](std::atomic<bool> &admitted) {
+    assert(terminal_gate.Proven());
+    ++terminal_checked;
+    while (!terminal_continue)
+      std::this_thread::yield();
+    admitted = terminal_gate.Admit([&] { ++terminal_effects; });
+  };
+  std::thread terminal_outbound(terminal_waiter,
+                                std::ref(terminal_outbound_admitted));
+  std::thread terminal_inbound(terminal_waiter,
+                               std::ref(terminal_inbound_admitted));
+  while (terminal_checked != 2)
+    std::this_thread::yield();
+  terminal_gate.Close();
+  terminal_continue = true;
+  terminal_outbound.join();
+  terminal_inbound.join();
+  assert(!terminal_gate.Proven());
+  assert(!terminal_outbound_admitted && !terminal_inbound_admitted);
+  assert(terminal_effects == 0);
+  assert(!terminal_gate.Prove() && !terminal_gate.Proven());
+  assert(!terminal_gate.Admit([&] { ++terminal_effects; }));
+  assert(terminal_gate.TryAdmit([&] { ++terminal_effects; }) ==
+         DirectAdmissionResult::Denied);
+  assert(terminal_effects == 0);
+
+  // Terminal closure is safe even when a lower-level effect discovers the
+  // failure while already admitted; publication can then happen after Admit
+  // returns without recursively acquiring the gate.
+  DirectRouteGate effect_failure_gate;
+  assert(effect_failure_gate.Prove());
+  bool effect_returned = false;
+  assert(effect_failure_gate.Admit([&] {
+    effect_failure_gate.Close();
+    effect_returned = true;
+  }));
+  assert(effect_returned && !effect_failure_gate.Proven());
+  assert(!effect_failure_gate.Prove());
 
   std::atomic<bool> entered{}, release{}, closed{};
   CallbackGate gate;

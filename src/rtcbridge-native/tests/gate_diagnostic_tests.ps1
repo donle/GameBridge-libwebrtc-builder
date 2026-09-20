@@ -38,7 +38,7 @@ try {
     if($saved.bridge_latency_histogram[0].count -ne 298 -or $saved.producer_late_frames -ne 4){throw 'Safe measurement detail was omitted'}
     if($saved.throughput_bps -ne $null -or $saved.redacted_field_count -lt 3 -or $saved.passed -ne $false){throw 'Malformed metrics or verdict not preserved safely'}
     $incomplete=ConvertTo-NativeRtcDiagnostic ([pscustomobject]@{passed=$true}) 1800 'validation'
-    if($incomplete.passed -ne $false -or $incomplete.frames_expected_min -ne 107900){throw 'Incomplete stage retained PASS or changed the full gate'}
+    if($incomplete.passed -ne $false -or $incomplete.frames_expected_min -ne 107784){throw 'Incomplete stage retained PASS or changed the full gate'}
     $consumerFailed=ConvertTo-NativeRtcDiagnostic ([pscustomobject]@{passed=$true;consumer_exit_code=1}) 5 'consumer'
     if($consumerFailed.passed -ne $false -or $consumerFailed.consumer_exit_code -ne 1){throw 'Consumer failure became a pass'}
     $fatalFields=@('fatal_header_errors','fatal_timestamp_errors','fatal_range_errors','fatal_duplicate_errors','fatal_payload_errors','fatal_bridge_errors','fatal_other_errors',

@@ -210,6 +210,7 @@ $metadata=@{
     runtime_socket='passed';connection_diagnostics='passed'
     sender_bitrate='passed';sender_pacer='passed'
     core_tests='passed';injector_cold_start='passed';abi_production='passed';abi_probe='passed';short_gate='passed'
+    network_contract='gb_rtc_create_v2/direct-only/47981-47990';production_export_count=10
 }
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payload 'native-build.json') -Encoding UTF8
 foreach($name in @('LICENSE.md','THIRD_PARTY_LICENSES.md','PATENTS.txt')) {

@@ -1,6 +1,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include "gamebridge_rtc.h"
+#include "gamebridge/audio/opus_codec.h"
 #include "rtc_media_fixture.h"
 #include "rtc_connection_diagnostics.h"
 #include <atomic>
@@ -16,6 +17,7 @@
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"line %d: %s\n",__LINE__,#x); return 1; } } while(false)
 static_assert(sizeof(gb_rtc_handle) == 8 && sizeof(gb_rtc_result) == 4);
 static_assert(sizeof(gb_rtc_config) == 24 && offsetof(gb_rtc_config, ice_json_utf8) == 8 && offsetof(gb_rtc_config, ice_json_size) == 16);
+static_assert(sizeof(gb_rtc_network_config) == 64 && offsetof(gb_rtc_network_config, policy) == 8 && offsetof(gb_rtc_network_config, udp_port_min) == 12 && offsetof(gb_rtc_network_config, udp_port_max) == 16 && offsetof(gb_rtc_network_config, external_ipv4_present) == 20 && offsetof(gb_rtc_network_config, external_ipv4) == 24 && offsetof(gb_rtc_network_config, reserved) == 32);
 static_assert(sizeof(gb_rtc_video) == 40 && offsetof(gb_rtc_video, data) == 8 && offsetof(gb_rtc_video, keyframe) == 32);
 static_assert(sizeof(gb_rtc_audio) == 32 && offsetof(gb_rtc_audio, timestamp48k) == 20);
 static_assert(sizeof(gb_rtc_media_event)==16 && offsetof(gb_rtc_media_event,timestamp)==8);
@@ -24,6 +26,7 @@ extern "C" int gb_rtc_c_layout(void);
 
 struct Api {
   decltype(&gb_rtc_create) create{};
+  decltype(&gb_rtc_create_v2) create_v2{};
   decltype(&gb_rtc_close) close{};
   decltype(&gb_rtc_create_offer) offer{};
   decltype(&gb_rtc_create_answer) answer{};
@@ -41,9 +44,9 @@ struct Api {
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(image + dos->e_lfanew);
     const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(image + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-    if (exports->NumberOfNames != (testing ? 10u : 9u) || exports->NumberOfFunctions != exports->NumberOfNames) return false;
+    if (exports->NumberOfNames != (testing ? 11u : 10u) || exports->NumberOfFunctions != exports->NumberOfNames) return false;
 #define LOAD(field, name) field = reinterpret_cast<decltype(field)>(GetProcAddress(dll, name)); if (!field) return false
-    LOAD(create, "gb_rtc_create"); LOAD(close, "gb_rtc_close");
+    LOAD(create, "gb_rtc_create"); LOAD(create_v2, "gb_rtc_create_v2"); LOAD(close, "gb_rtc_close");
     LOAD(offer, "gb_rtc_create_offer"); LOAD(answer, "gb_rtc_create_answer");
     LOAD(remote, "gb_rtc_set_remote_description"); LOAD(candidate, "gb_rtc_add_candidate");
     LOAD(video, "gb_rtc_send_video"); LOAD(audio, "gb_rtc_send_audio");
@@ -97,7 +100,10 @@ void __cdecl peer_callback(void* context, uint32_t type, const uint8_t* bytes, u
   events.pending.push_back({type, {bytes, bytes + size}});
   ++events.callbacks;
 }
-int connect_native_peers(Api& api, const gb_rtc_config& config) {
+template<class Call>gb_rtc_result RetryBackpressure(Call&& call,uint32_t timeout_ms=2000){const auto deadline=GetTickCount64()+timeout_ms;gb_rtc_result result;do{result=call();if(result==GB_RTC_BACKPRESSURE)Sleep(1);}while(result==GB_RTC_BACKPRESSURE&&GetTickCount64()<deadline);return result;}
+int connect_native_peers(Api& api, const gb_rtc_config& config,
+                         const gb_rtc_network_config& network,
+                         bool paced_audio_probe) {
   PeerEvents events[2];
   gb_rtc_handle peers[2]{};
   RtcConnectionDiagnostics trace;
@@ -122,10 +128,10 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
       Close();
     }
   } lifetime{api, peers, events, trace};
-  CHECK(api.create(&config, peer_callback, &events[0], &peers[0]) == GB_RTC_OK);
-  CHECK(api.create(&config, peer_callback, &events[1], &peers[1]) == GB_RTC_OK);
-  CHECK(api.answer(peers[1]) == GB_RTC_STATE);
-  CHECK(api.offer(peers[0]) == GB_RTC_OK);
+  CHECK(api.create_v2(&config, &network, peer_callback, &events[0], &peers[0]) == GB_RTC_OK);
+  CHECK(api.create_v2(&config, &network, peer_callback, &events[1], &peers[1]) == GB_RTC_OK);
+  CHECK(RetryBackpressure([&]{return api.answer(peers[1]);}) == GB_RTC_STATE);
+  CHECK(RetryBackpressure([&]{return api.offer(peers[0]);}) == GB_RTC_OK);
   bool connected[2]{}, routed[2]{}, gathered[2]{}, end_forwarded[2]{};
   const auto deadline = GetTickCount64() + 5000;
   while (!(connected[0] && connected[1] && routed[0] && routed[1] && gathered[0] && gathered[1] && end_forwarded[0] && end_forwarded[1])) {
@@ -156,7 +162,7 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
         if (event.type == GB_RTC_EVENT_CANDIDATE && trace.peers[source].candidate_end)
           end_forwarded[source] = true;
         if (event.type == GB_RTC_EVENT_DESCRIPTION && source == 0) {
-          const auto answer = api.answer(peers[1]);
+          const auto answer = RetryBackpressure([&]{return api.answer(peers[1]);});
           trace.Operation(1, RtcConnectionDiagnostics::Answer, answer);
           CHECK(answer == GB_RTC_OK);
         }
@@ -172,7 +178,7 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
   auto* borrowed=static_cast<uint8_t*>(VirtualAlloc(nullptr,videoBytes.size(),MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
   CHECK(borrowed);std::memcpy(borrowed,videoBytes.data(),videoBytes.size());
   gb_rtc_video video{sizeof(video),GB_RTC_ABI_VERSION,borrowed,static_cast<uint32_t>(videoBytes.size()),900,1920,1080,1,{}};
-  CHECK(api.video(peers[0],&video)==GB_RTC_OK);
+  CHECK(RetryBackpressure([&]{return api.video(peers[0],&video);})==GB_RTC_OK);
   std::memset(borrowed,0xff,videoBytes.size());CHECK(VirtualFree(borrowed,0,MEM_RELEASE));
   // Cold-start regression: the first and only submitted video AU must arrive
   // before any second media/data call can accidentally kick the native engine.
@@ -197,7 +203,7 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
   }
   gb_rtc_audio audio{sizeof(audio),GB_RTC_ABI_VERSION,audioBytes,sizeof(audioBytes),480,{}};
   trace.phase = RtcConnectionDiagnostics::MediaData;
-  CHECK(api.audio(peers[0],&audio)==GB_RTC_OK);
+  CHECK(RetryBackpressure([&]{return api.audio(peers[0],&audio);})==GB_RTC_OK);
   for (uint32_t kind : {GB_RTC_CHANNEL_RELIABLE,GB_RTC_CHANNEL_POINTER}) {
     gb_rtc_result result; const auto* bytes=kind==GB_RTC_CHANNEL_RELIABLE?controlBytes:pointerBytes;
     do {result=api.data(peers[0],kind,bytes,4);if(result==GB_RTC_STATE||result==GB_RTC_BACKPRESSURE)Sleep(1);} while(result!=GB_RTC_OK&&GetTickCount64()<mediaDeadline);
@@ -221,6 +227,13 @@ int connect_native_peers(Api& api, const gb_rtc_config& config) {
     }
     Sleep(1);
   }
+  if(paced_audio_probe)for(uint32_t i=1;i<20;++i){
+    audio.timestamp48k=480+i*960;CHECK(RetryBackpressure([&]{return api.audio(peers[0],&audio);})==GB_RTC_OK);const auto pacedDeadline=GetTickCount64()+2000;
+    while(audioCount!=i+1){CHECK(GetTickCount64()<pacedDeadline);std::vector<PeerEvents::Payload> pending;{std::lock_guard lock(events[1].mutex);pending.swap(events[1].pending);}
+      for(const auto& event:pending){CHECK(event.type!=GB_RTC_EVENT_ERROR);if(event.type!=GB_RTC_EVENT_AUDIO)continue;gb_rtc_media_event header{};CHECK(event.bytes.size()==sizeof(header)+sizeof(audioBytes));std::memcpy(&header,event.bytes.data(),sizeof(header));CHECK(header.timestamp==480+audioCount*960);++audioCount;}Sleep(1);}
+  }
+  if(paced_audio_probe){gamebridge::audio::OpusPacketizer realOpus(0,48000);std::vector<float> knownTone(960*20*2,0.0f);auto realPackets=realOpus.Push(knownTone,960*20,0,false,false);CHECK(realPackets.size()==20);
+    for(uint32_t i=20;i<40;++i){const auto& encoded=realPackets[i-20];audio.data=encoded.bytes.data();audio.data_size=static_cast<uint32_t>(encoded.bytes.size());audio.timestamp48k=480+i*960;CHECK(RetryBackpressure([&]{return api.audio(peers[0],&audio);})==GB_RTC_OK);const auto pacedDeadline=GetTickCount64()+2000;while(audioCount!=i+1){CHECK(GetTickCount64()<pacedDeadline);std::vector<PeerEvents::Payload> pending;{std::lock_guard lock(events[1].mutex);pending.swap(events[1].pending);}for(const auto& event:pending){CHECK(event.type!=GB_RTC_EVENT_ERROR);if(event.type!=GB_RTC_EVENT_AUDIO)continue;gb_rtc_media_event header{};CHECK(event.bytes.size()==sizeof(header)+encoded.bytes.size());std::memcpy(&header,event.bytes.data(),sizeof(header));CHECK(header.timestamp==480+audioCount*960);++audioCount;}Sleep(1);}}}
   trace.phase = RtcConnectionDiagnostics::Closing;
   lifetime.Close();
   const auto first = events[0].callbacks.load(), second = events[1].callbacks.load();
@@ -237,7 +250,10 @@ int main(int argc, char** argv) {
   CHECK(gb_rtc_c_layout());
   const char ice[] = "{}";
   gb_rtc_config config{sizeof(config), GB_RTC_ABI_VERSION, ice, 2, 0};
-  CHECK(connect_native_peers(api, config) == 0);
+  gb_rtc_network_config network{sizeof(network), GB_RTC_ABI_VERSION,
+                                GB_RTC_NETWORK_DIRECT_ONLY, 47981, 47990, 0,
+                                {}, {}, {}};
+  CHECK(connect_native_peers(api, config, network, !testing) == 0);
   gb_rtc_handle handle = 99;
   CHECK(api.create(nullptr, nullptr, nullptr, &handle) == GB_RTC_INVALID && handle == 0);
   CHECK(api.create(&config, nullptr, nullptr, nullptr) == GB_RTC_INVALID);
@@ -253,6 +269,44 @@ int main(int argc, char** argv) {
   CHECK(api.create(&invalid, nullptr, nullptr, &handle) == GB_RTC_INVALID);
   invalid = config; invalid.ice_json_size = 0;
   CHECK(api.create(&invalid, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  CHECK(api.create_v2(&config, nullptr, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  CHECK(api.create_v2(&config, &network, nullptr, nullptr, nullptr) == GB_RTC_INVALID);
+  auto invalid_network = network; invalid_network.size--;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  invalid_network = network; invalid_network.abi_version++;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  invalid_network = network; invalid_network.policy |= 2;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  invalid_network = network; invalid_network.udp_port_min--;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  invalid_network = network; invalid_network.udp_port_max--;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  invalid_network = network; invalid_network.external_ipv4_present = 1;
+  invalid_network.external_ipv4[0] = 192; invalid_network.external_ipv4[1] = 168;
+  invalid_network.external_ipv4[2] = 1; invalid_network.external_ipv4[3] = 1;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  invalid_network = network; invalid_network.external_ipv4_present = 1;
+  invalid_network.external_ipv4[0] = 192; invalid_network.external_ipv4[1] = 88;
+  invalid_network.external_ipv4[2] = 99; invalid_network.external_ipv4[3] = 1;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  invalid_network = network; invalid_network.reserved0[3] = 1;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  invalid_network = network; invalid_network.reserved[3] = 1;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  const char turn[] = R"({"iceServers":[{"urls":"turn:relay.example:3478","username":"u","credential":"p"}]})";
+  auto turn_config = config; turn_config.ice_json_utf8 = turn;
+  turn_config.ice_json_size = static_cast<uint32_t>(sizeof(turn) - 1);
+  CHECK(api.create_v2(&turn_config, &network, nullptr, nullptr, &handle) == GB_RTC_INVALID);
+  CHECK(api.create_v2(&config, &network, nullptr, nullptr, &handle) == GB_RTC_OK && handle != 0);
+  const char relay_candidate[] = "{\"candidate\":\"candidate:1 1 udp 1 203.0.113.10 47981 typ relay\"}";
+  CHECK(api.candidate(handle, reinterpret_cast<const uint8_t*>(relay_candidate),
+                      static_cast<uint32_t>(sizeof(relay_candidate) - 1)) == GB_RTC_INVALID);
+  api.close(handle);
+  invalid_network = network; invalid_network.external_ipv4_present = 1;
+  invalid_network.external_ipv4[0] = 8; invalid_network.external_ipv4[1] = 8;
+  invalid_network.external_ipv4[2] = 8; invalid_network.external_ipv4[3] = 8;
+  CHECK(api.create_v2(&config, &invalid_network, nullptr, nullptr, &handle) == GB_RTC_OK && handle != 0);
+  api.close(handle);
   for (const char* malformed : {"{", "null", "[]", "{}{}", "\xff", "{\"iceServers\":[{\"urls\":\"https://invalid\"}]}"}) {
     invalid = config; invalid.ice_json_utf8 = malformed; invalid.ice_json_size = static_cast<uint32_t>(std::strlen(malformed));
     CHECK(api.create(&invalid, nullptr, nullptr, &handle) == GB_RTC_INVALID && handle == 0);
@@ -348,13 +402,17 @@ int main(int argc, char** argv) {
     auto* borrowed = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     CHECK(borrowed); std::memcpy(borrowed, videoBytes, sizeof(videoBytes));
     video.data = borrowed;
-    CHECK(api.video(copy.handle, &video) == GB_RTC_OK);
+    gb_rtc_result submit_video=GB_RTC_BACKPRESSURE;const auto copy_deadline=GetTickCount64()+2000;
+    do{submit_video=api.video(copy.handle,&video);if(submit_video==GB_RTC_BACKPRESSURE)Sleep(1);}while(submit_video==GB_RTC_BACKPRESSURE&&GetTickCount64()<copy_deadline);
+    CHECK(submit_video==GB_RTC_OK);
     std::memset(borrowed, 0xff, sizeof(videoBytes)); CHECK(VirtualFree(borrowed, 0, MEM_RELEASE));
     CHECK(api.probe(copy.handle, 1) == GB_RTC_OK);
     CHECK(copy.observed == std::vector<uint8_t>(videoBytes, videoBytes + sizeof(videoBytes)));
     borrowed = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     CHECK(borrowed); std::memcpy(borrowed, audioBytes, sizeof(audioBytes));
-    audio.data = borrowed; CHECK(api.audio(copy.handle, &audio) == GB_RTC_OK);
+    audio.data = borrowed;gb_rtc_result submit_audio=GB_RTC_BACKPRESSURE;const auto audio_copy_deadline=GetTickCount64()+2000;
+    do{submit_audio=api.audio(copy.handle,&audio);if(submit_audio==GB_RTC_BACKPRESSURE)Sleep(1);}while(submit_audio==GB_RTC_BACKPRESSURE&&GetTickCount64()<audio_copy_deadline);
+    CHECK(submit_audio==GB_RTC_OK);
     std::memset(borrowed, 0xff, sizeof(audioBytes)); CHECK(VirtualFree(borrowed, 0, MEM_RELEASE));
     CHECK(api.probe(copy.handle, 2) == GB_RTC_OK);
     CHECK(copy.observed == std::vector<uint8_t>(audioBytes, audioBytes + sizeof(audioBytes)));
