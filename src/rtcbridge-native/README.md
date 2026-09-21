@@ -33,6 +33,16 @@ sequence guard. No second user frame or duplicate/dummy encoded AU is injected.
 Metrics include receiver queue replacement and receiver lock-contention drops,
 not a direct packet-loss count.
 
+The hash-pinned `patches/receiver-consumed-frame.patch` adds an explicit
+encoded-receiver acknowledgement. Only a complete video frame accepted by the
+bridge queue is acknowledged; it is never forwarded to the built-in decoder.
+On the owning receiver queue, the original frame's immutable unwrapped end
+sequence and assembly epoch retire PacketBuffer state through that frame.
+Newer incomplete/reordered packets remain recoverable. Rejected frames, foreign
+receivers, receiver reset, and stale epochs cannot advance cleanup; NACK and
+decode/reference-finder state are unchanged. Actual pinned PacketBuffer and
+transformer regressions run before the hosted production build.
+
 Production handles are generation checked and never wrap retired generations.
 Each session has serialized callbacks. External close cancels admission and
 waits for borrowed callbacks; callback-originated close across any sessions

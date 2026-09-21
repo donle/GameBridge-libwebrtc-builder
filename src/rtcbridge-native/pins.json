@@ -1,6 +1,7 @@
 {
   "webrtc_revision": "c250ac7568212f05892447d8e8673f8e55d716d9",
   "encoder_ready_patch_sha256": "51d9cb6d62d8be233934c9073c0936f8cccab84cf7d3075b3939eb06832d6c8e",
+  "receiver_consumed_patch_sha256": "1449e6ca87f4dc49ede74c12cb7f231a756c77f65593ec8614813552bb78c8d6",
   "license_root_patch_sha256": "d1dd442d67647f053f9d0455b83567efb6ac19d899bd025a802866650e9ad7aa",
   "depot_tools_revision": "0306e4682b4ac35287c726fa35a983157a625902",
   "chromium_build_revision": "a56d226360eb0b3eaf423bfbf3cfe35a19e4951a",

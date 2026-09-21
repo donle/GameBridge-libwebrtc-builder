@@ -125,6 +125,12 @@ try {
     Check-Exit 'Encoder-ready patch applicability'
     git -C src apply $startupPatch
     Check-Exit 'Encoder-ready patch application'
+    $receiverPatch=Join-Path $repository 'src/rtcbridge-native/patches/receiver-consumed-frame.patch'
+    if ((Get-FileHash -LiteralPath $receiverPatch -Algorithm SHA256).Hash -ine $pins.receiver_consumed_patch_sha256) { throw 'Receiver-consumed patch hash mismatch' }
+    git -C src apply --check $receiverPatch
+    Check-Exit 'Receiver-consumed patch applicability'
+    git -C src apply $receiverPatch
+    Check-Exit 'Receiver-consumed patch application'
     $licensePatch=Join-Path $repository 'src/rtcbridge-native/patches/license-root-target.patch'
     if ((Get-FileHash -LiteralPath $licensePatch -Algorithm SHA256).Hash -ine $pins.license_root_patch_sha256) { throw 'License root-target patch hash mismatch' }
     git -C src apply --check $licensePatch
@@ -147,6 +153,7 @@ try {
         }
     }
     & "$bridgeRoot/rtcbridge-native/tests/prepare_injector_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/pinned_injector_methods.h')
+    & "$bridgeRoot/rtcbridge-native/tests/prepare_receiver_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/pinned_receiver_consumed.h')
     & "$bridgeRoot/rtcbridge-native/tests/prepare_runtime_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/runtime_network_prefix.h')
     & "$bridgeRoot/rtcbridge-native/tests/prepare_sender_test.ps1" -SourceRoot (Join-Path $sourceRoot 'src') -Output (Join-Path $bridgeRoot 'rtcbridge-native/tests/pinned_sender_settings.h')
     & "$repository/src/rtcbridge-native/tests/ci_gn_tests.ps1" -GnExecutable (Join-Path $sourceRoot 'src/buildtools/win/gn.exe')
@@ -182,6 +189,10 @@ try {
         & "$binary/rtc_transport_diagnostics_tests.exe";Check-Exit 'Fixed numeric transport stats diagnostics'
         & "$binary/rtc_sender_bitrate_tests.exe";Check-Exit 'Actual bridge and pinned encoder bitrate settings'
         & "$binary/rtc_sender_pacer_tests.exe";Check-Exit 'Pinned pacer configured-rate regression'
+        autoninja -C out/Release gamebridge/rtcbridge-native:rtc_receiver_consumption_tests gamebridge/rtcbridge-native:rtc_receiver_transformer_tests -j 4
+        Check-Exit 'Pinned receiver consumption regression build'
+        & "$binary/rtc_receiver_consumption_tests.exe";Check-Exit 'Pinned PacketBuffer consumed-only cleanup regression'
+        & "$binary/rtc_receiver_transformer_tests.exe";Check-Exit 'Pinned receiver transformer acknowledgement ownership'
         autoninja -C out/Release gamebridge/rtcbridge-native:gamebridge_rtc gamebridge/rtcbridge-native:rtc_abi_tests -j 4
         Check-Exit 'Production native bridge/ABI build'
         & "$binary/rtc_abi_tests.exe" "$binary/gamebridge_rtc.dll" production;Check-Exit 'Production RTC ABI'
@@ -203,6 +214,7 @@ $metadata=@{
     source_revision=$env:GITHUB_SHA;webrtc_revision=$pins.webrtc_revision;depot_tools_revision=$pins.depot_tools_revision
     chromium_build_revision=$pins.chromium_build_revision;gn_args=$pins.gn_args
     encoder_ready_patch_sha256=$pins.encoder_ready_patch_sha256
+    receiver_consumed_patch_sha256=$pins.receiver_consumed_patch_sha256
     license_root_patch_sha256=$pins.license_root_patch_sha256
     runner_image=$env:ImageOS;runner_image_version=$env:ImageVersion
     visual_studio_path=$vs;sdk_installer_sha256=$pins.windows_sdk_installer_sha256
@@ -211,6 +223,7 @@ $metadata=@{
     git_executable=$gitExe;git_version=$gitVersion;depot_bootstrap_revision=$depotAfterBootstrap
     runtime_socket='passed';connection_diagnostics='passed'
     sender_bitrate='passed';sender_pacer='passed'
+    receiver_consumption='passed';receiver_transformer='passed'
     core_tests='passed';injector_cold_start='passed';abi_production='passed';abi_probe='passed';short_gate='passed'
     network_contract='gb_rtc_create_v2/direct-only/47981-47990';production_export_count=10
 }

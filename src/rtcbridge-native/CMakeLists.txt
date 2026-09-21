@@ -60,6 +60,45 @@ if(RTC_WEBRTC_SOURCE)
     target_compile_options(rtc_sender_pacer_tests PRIVATE -Wno-nullability-completeness -Wno-format)
   endif()
   add_test(NAME rtc_sender_pacer COMMAND rtc_sender_pacer_tests)
+  add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/pinned_receiver_consumed.h"
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/prepare_receiver_test.ps1"
+      -SourceRoot "${RTC_WEBRTC_SOURCE}" -Output "${CMAKE_CURRENT_BINARY_DIR}/pinned_receiver_consumed.h"
+    DEPENDS tests/prepare_receiver_test.ps1 "${RTC_WEBRTC_SOURCE}/video/rtp_video_stream_receiver2.cc")
+  add_executable(rtc_receiver_consumption_tests tests/receiver_consumption_tests.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/pinned_receiver_consumed.h"
+    "${RTC_WEBRTC_SOURCE}/modules/video_coding/packet_buffer.cc"
+    "${RTC_WEBRTC_SOURCE}/modules/rtp_rtcp/source/rtp_packet_received.cc" ${pacer_dependencies})
+  target_compile_features(rtc_receiver_consumption_tests PRIVATE cxx_std_20)
+  target_compile_definitions(rtc_receiver_consumption_tests PRIVATE NDEBUG WEBRTC_WIN RTC_DISABLE_LOGGING NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(rtc_receiver_consumption_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${RTC_WEBRTC_SOURCE}" "${RTC_WEBRTC_SOURCE}/third_party/abseil-cpp")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(rtc_receiver_consumption_tests PRIVATE -Wno-nullability-completeness -Wno-format)
+  endif()
+  add_test(NAME rtc_receiver_consumption COMMAND rtc_receiver_consumption_tests)
+  set(receiver_dependencies
+    api/frame_transformer_interface.cc api/task_queue/task_queue_base.cc
+    api/video/encoded_frame.cc api/video/encoded_image.cc api/video_codecs/video_codec.cc
+    modules/video_coding/include/video_codec_interface.cc
+    common_video/generic_frame_descriptor/generic_frame_info.cc
+    api/transport/rtp/dependency_descriptor.cc
+    api/video_codecs/scalability_mode.cc api/video_codecs/simulcast_stream.cc
+    api/video_codecs/sdp_video_format.cc api/video_codecs/h264_profile_level_id.cc
+    api/video_codecs/vp9_profile.cc api/video_codecs/av1_profile.cc
+    media/base/media_constants.cc
+    rtc_base/string_to_number.cc
+    modules/rtp_rtcp/source/frame_object.cc
+    modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc)
+  list(TRANSFORM receiver_dependencies PREPEND "${RTC_WEBRTC_SOURCE}/")
+  add_executable(rtc_receiver_transformer_tests tests/receiver_transformer_tests.cpp ${receiver_dependencies} ${pacer_dependencies})
+  target_compile_features(rtc_receiver_transformer_tests PRIVATE cxx_std_20)
+  target_compile_definitions(rtc_receiver_transformer_tests PRIVATE NDEBUG WEBRTC_WIN RTC_DISABLE_LOGGING NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(rtc_receiver_transformer_tests PRIVATE "${RTC_WEBRTC_SOURCE}" "${RTC_WEBRTC_SOURCE}/third_party/abseil-cpp")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(rtc_receiver_transformer_tests PRIVATE -Wno-nullability-completeness -Wno-format -ffunction-sections -fdata-sections)
+    target_link_options(rtc_receiver_transformer_tests PRIVATE -Wl,--gc-sections)
+  endif()
+  add_test(NAME rtc_receiver_transformer COMMAND rtc_receiver_transformer_tests)
   add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/runtime_network_prefix.h"
     COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/prepare_runtime_test.ps1"

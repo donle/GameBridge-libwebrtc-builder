@@ -1,0 +1,204 @@
+diff --git a/api/frame_transformer_interface.h b/api/frame_transformer_interface.h
+index f29fc38..c6f082b 100644
+--- a/api/frame_transformer_interface.h
++++ b/api/frame_transformer_interface.h
+@@ -177,6 +177,12 @@ class TransformedFrameCallback : public RefCountInterface {
+   virtual void OnTransformedFrame(
+       std::unique_ptr<TransformableFrameInterface> frame) = 0;
+ 
++  // GameBridge: an encoded-only consumer accepted the original receiver frame.
++  // Release receive-buffer state without forwarding to the built-in decoder.
++  // Unsupported sinks deliberately do nothing; never imply successful decode.
++  virtual void OnFrameConsumed(
++      std::unique_ptr<TransformableFrameInterface> frame) {}
++
+   // Request to no longer be called on each frame, instead having frames be
+   // sent directly to OnTransformedFrame without additional work.
+   // TODO(crbug.com/1502781): Make pure virtual once all mocks have
+diff --git a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
+index 9ce1abf..19ce1a9 100644
+--- a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
++++ b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
+@@ -44,11 +44,13 @@ class TransformableVideoReceiverFrame
+  public:
+   TransformableVideoReceiverFrame(std::unique_ptr<RtpFrameObject> frame,
+                                   uint32_t ssrc,
+-                                  RtpVideoFrameReceiver* receiver)
++                                  RtpVideoFrameReceiver* receiver,
++                                  std::function<void()> on_consumed)
+       : TransformableVideoFrameInterface(Passkey()),
+         frame_(std::move(frame)),
+         metadata_(frame_->GetRtpVideoHeader().GetAsMetadata()),
+-        receiver_(receiver) {
++        receiver_(receiver),
++        on_consumed_(std::move(on_consumed)) {
+     metadata_.SetSsrc(ssrc);
+     metadata_.SetCsrcs(frame_->Csrcs());
+   }
+@@ -128,10 +130,16 @@ class TransformableVideoReceiverFrame
+ 
+   const RtpVideoFrameReceiver* Receiver() { return receiver_; }
+ 
++  void Consume() {
++    if (on_consumed_)
++      std::exchange(on_consumed_, {})();
++  }
++
+  private:
+   std::unique_ptr<RtpFrameObject> frame_;
+   VideoFrameMetadata metadata_;
+   RtpVideoFrameReceiver* receiver_;
++  std::function<void()> on_consumed_;
+ };
+ 
+ RtpVideoStreamReceiverFrameTransformerDelegate::
+@@ -161,7 +169,8 @@ void RtpVideoStreamReceiverFrameTransformerDelegate::Reset() {
+ }
+ 
+ void RtpVideoStreamReceiverFrameTransformerDelegate::TransformFrame(
+-    std::unique_ptr<RtpFrameObject> frame) {
++    std::unique_ptr<RtpFrameObject> frame,
++    std::function<void()> on_consumed) {
+   RTC_DCHECK_RUN_ON(&network_sequence_checker_);
+   if (short_circuit_) {
+     // Just pass the frame straight back.
+@@ -169,7 +178,7 @@ void RtpVideoStreamReceiverFrameTransformerDelegate::TransformFrame(
+   } else {
+     frame_transformer_->Transform(
+         std::make_unique<TransformableVideoReceiverFrame>(std::move(frame),
+-                                                          ssrc_, receiver_));
++            ssrc_, receiver_, std::move(on_consumed)));
+   }
+ }
+ 
+@@ -189,6 +198,28 @@ void RtpVideoStreamReceiverFrameTransformerDelegate::StartShortCircuiting() {
+   });
+ }
+ 
++void RtpVideoStreamReceiverFrameTransformerDelegate::OnFrameConsumed(
++    std::unique_ptr<TransformableFrameInterface> frame) {
++  scoped_refptr<RtpVideoStreamReceiverFrameTransformerDelegate> delegate(this);
++  network_thread_->PostTask(
++      [delegate = std::move(delegate), frame = std::move(frame)]() mutable {
++        delegate->FrameConsumed(std::move(frame));
++      });
++}
++
++void RtpVideoStreamReceiverFrameTransformerDelegate::FrameConsumed(
++    std::unique_ptr<TransformableFrameInterface> frame) {
++  RTC_DCHECK_RUN_ON(&network_sequence_checker_);
++  if (!receiver_ || !frame || frame->GetDirection() !=
++          TransformableFrameInterface::Direction::kReceiver)
++    return;
++  auto* received = static_cast<TransformableVideoReceiverFrame*>(frame.get());
++  // Unlike transformed frames, consumed acknowledgements must never be rebased
++  // from a different receiver. Reset also invalidates outstanding callbacks.
++  if (received->Receiver() == receiver_)
++    received->Consume();
++}
++
+ void RtpVideoStreamReceiverFrameTransformerDelegate::
+     StartShortCircuitingOnNetworkSequence() {
+   RTC_DCHECK_RUN_ON(&network_sequence_checker_);
+diff --git a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.h b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.h
+index 10405ad..9892add 100644
+--- a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.h
++++ b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.h
+@@ -12,6 +12,7 @@
+ #define MODULES_RTP_RTCP_SOURCE_RTP_VIDEO_STREAM_RECEIVER_FRAME_TRANSFORMER_DELEGATE_H_
+ 
+ #include <cstdint>
++#include <functional>
+ #include <memory>
+ 
+ #include "api/frame_transformer_interface.h"
+@@ -51,13 +52,17 @@ class RtpVideoStreamReceiverFrameTransformerDelegate
+   void Reset();
+ 
+   // Delegates the call to FrameTransformerInterface::TransformFrame.
+-  void TransformFrame(std::unique_ptr<RtpFrameObject> frame);
++  void TransformFrame(std::unique_ptr<RtpFrameObject> frame,
++                      std::function<void()> on_consumed = {});
+ 
+   // Implements TransformedFrameCallback. Can be called on any thread. Posts
+   // the transformed frame to be managed on the `network_thread_`.
+   void OnTransformedFrame(
+       std::unique_ptr<TransformableFrameInterface> frame) override;
+ 
++  void OnFrameConsumed(
++      std::unique_ptr<TransformableFrameInterface> frame) override;
++
+   void StartShortCircuiting() override;
+ 
+   // Delegates the call to RtpVideoFrameReceiver::ManageFrame on the
+@@ -68,6 +73,7 @@ class RtpVideoStreamReceiverFrameTransformerDelegate
+   ~RtpVideoStreamReceiverFrameTransformerDelegate() override = default;
+ 
+  private:
++  void FrameConsumed(std::unique_ptr<TransformableFrameInterface> frame);
+   void StartShortCircuitingOnNetworkSequence();
+ 
+   RTC_NO_UNIQUE_ADDRESS SequenceChecker network_sequence_checker_;
+diff --git a/video/rtp_video_stream_receiver2.cc b/video/rtp_video_stream_receiver2.cc
+index 6e92ced..fd719c1 100644
+--- a/video/rtp_video_stream_receiver2.cc
++++ b/video/rtp_video_stream_receiver2.cc
+@@ -722,6 +722,7 @@ std::optional<int64_t> RtpVideoStreamReceiver2::UnwrapSequenceNumberOrRecover(
+                                                        &rtcp_feedback_buffer_);
+     }
+     rtp_seq_num_unwrapper_.Reset();
++    ++consumed_frame_epoch_;
+     frame_id_unwrapper_.Reset();
+     video_structure_.reset();
+     video_structure_frame_id_.reset();
+@@ -1173,7 +1174,15 @@ void RtpVideoStreamReceiver2::OnAssembledFrame(
+   if (buffered_frame_decryptor_ != nullptr) {
+     buffered_frame_decryptor_->ManageEncryptedFrame(std::move(frame));
+   } else if (frame_transformer_delegate_) {
+-    frame_transformer_delegate_->TransformFrame(std::move(frame));
++    // Capture the unwrapped sequence in the assembly epoch, not when a delayed
++    // consumer acknowledges it (possibly after RTP sequence wrap/recovery).
++    const int64_t last_seq_num =
++        rtp_seq_num_unwrapper_.PeekUnwrap(frame->last_seq_num());
++    frame_transformer_delegate_->TransformFrame(
++        std::move(frame),
++        [this, last_seq_num, epoch = consumed_frame_epoch_] {
++          FrameConsumed(last_seq_num, epoch);
++        });
+   } else {
+     OnCompleteFrames(reference_finder_->ManageFrame(std::move(frame)));
+   }
+@@ -1557,6 +1566,19 @@ bool RtpVideoStreamReceiver2::DeliverRtcp(
+   return true;
+ }
+ 
++void RtpVideoStreamReceiver2::FrameConsumed(int64_t last_seq_num,
++                                           uint64_t epoch) {
++  RTC_DCHECK_RUN_ON(worker_queue_);
++  if (epoch != consumed_frame_epoch_ || !newest_media_seq_num_ ||
++      last_seq_num > *newest_media_seq_num_)
++    return;
++  // The original complete frame was accepted by an encoded-only consumer.
++  // Retire only through that frame, as FrameDecoded does for the decode path.
++  // Newer partial packets remain recoverable; no decode/reference/NACK state
++  // is advanced, and an old acknowledgement cannot move ClearTo backwards.
++  packet_buffer_.ClearTo(last_seq_num);
++}
++
+ void RtpVideoStreamReceiver2::FrameContinuous(int64_t picture_id) {
+   RTC_DCHECK_RUN_ON(worker_queue_);
+   if (!nack_module_)
+diff --git a/video/rtp_video_stream_receiver2.h b/video/rtp_video_stream_receiver2.h
+index 7b13396..fea312f 100644
+--- a/video/rtp_video_stream_receiver2.h
++++ b/video/rtp_video_stream_receiver2.h
+@@ -376,6 +376,9 @@ class RtpVideoStreamReceiver2 : public LossNotificationSender,
+       RTPVideoHeader* video_header) RTC_RUN_ON(worker_queue_);
+   void OnAssembledFrame(std::unique_ptr<RtpFrameObject> frame)
+       RTC_RUN_ON(worker_queue_);
++  void FrameConsumed(int64_t last_seq_num, uint64_t epoch)
++      RTC_RUN_ON(worker_queue_);
++  uint64_t consumed_frame_epoch_ RTC_GUARDED_BY(worker_queue_) = 0;
+   void UpdatePacketReceiveTimestamps(const RtpPacketReceived& packet,
+                                      bool is_keyframe)
+       RTC_RUN_ON(worker_queue_);

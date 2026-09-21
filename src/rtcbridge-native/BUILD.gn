@@ -172,6 +172,23 @@ executable("rtc_sender_pacer_tests") {
   ]
 }
 
+executable("rtc_receiver_consumption_tests") {
+  sources = [ "tests/receiver_consumption_tests.cpp" ]
+  configs += [ "//:common_config", ":bridge_config" ]
+  deps = [ "//modules/video_coding:packet_buffer" ]
+}
+
+executable("rtc_receiver_transformer_tests") {
+  sources = [ "tests/receiver_transformer_tests.cpp" ]
+  configs += [ "//:common_config", ":bridge_config" ]
+  deps = [
+    "//api:make_ref_counted",
+    "//api:frame_transformer_interface",
+    "//api/task_queue:task_queue",
+    "//modules/rtp_rtcp",
+  ]
+}
+
 group("all") {
   deps = [
     ":gamebridge_rtc",
@@ -183,6 +200,8 @@ group("all") {
     ":rtc_connection_diagnostics_tests",
     ":rtc_injector_cold_start_tests",
     ":rtc_native_core_tests",
+    ":rtc_receiver_consumption_tests",
+    ":rtc_receiver_transformer_tests",
     ":rtc_network_diagnostics_tests",
     ":rtc_runtime_socket_tests",
     ":rtc_sender_bitrate_tests",

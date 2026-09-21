@@ -1099,7 +1099,7 @@ private:
     const bool is_video = transceiver->media_type() == w::MediaType::VIDEO;
     transceiver->receiver()->SetFrameTransformer(
         w::make_ref_counted<Transformer>([weak = weak_from_this(),
-                                          is_video](auto frame, auto) {
+                                          is_video](auto frame, auto sink) {
           auto self = weak.lock();
           if (!self || self->closed || self->failed)
             return;
@@ -1120,9 +1120,12 @@ private:
             self->Fail("media_write_failed");
             return;
           }
-          if (queue.Push(payload, std::get<w::RtpTimestampWithOffset>(time).value,
-                         samples) == GB_RTC_BACKPRESSURE)
+          const auto accepted = queue.Push(
+              payload, std::get<w::RtpTimestampWithOffset>(time).value, samples);
+          if (accepted == GB_RTC_BACKPRESSURE)
             ++self->receive_contention[is_video ? 0 : 1];
+          if (is_video && accepted == GB_RTC_OK && sink)
+            sink->OnFrameConsumed(std::move(frame));
           self->wake_.notify_one();
           }, [&] { self->Fail("event_oversize"); });
           // Encoded payload is the consumer output. Do not decode, play audio
