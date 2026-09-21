@@ -5,8 +5,8 @@
     "files":  [
                   {
                       "path":  "src/rtcbridge-native/tests/core_tests.cpp",
-                      "sha256":  "7ecbd578b42cb6da33700776adf3375989879ec9996836efacb75ec5ef884176",
-                      "bytes":  21756
+                      "sha256":  "13cc654f7ecc93f8ead0da016de757dea293780d19e77550fe370bb516a7f9f3",
+                      "bytes":  24421
                   },
                   {
                       "path":  "src/rtcbridge-native/tests/depot_git_tests.py",
@@ -60,8 +60,8 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/src/selected_pair.h",
-                      "sha256":  "daa14bf22b7ad1d36518f05ae3be436412df89dca99d7f6e616fe4b5ffb2e061",
-                      "bytes":  2045
+                      "sha256":  "ddce23d28844e0033c8677b627a2ea7d17e5716d6073c4b2a13c9d7afb83c13e",
+                      "bytes":  2588
                   },
                   {
                       "path":  "src/rtcbridge-native/tests/ci_git_tests.ps1",
@@ -185,8 +185,8 @@
                   },
                   {
                       "path":  "src/native/tests/rtc_abi_tests.cpp",
-                      "sha256":  "97032c566b2c29187d7ca1d0eea652df919e1018e46ab4d3137cc26ff3d36da8",
-                      "bytes":  33411
+                      "sha256":  "533963ed3166e4a84e38f5ce3918396e26ce1b60925dfb322d20ecaacb3e174a",
+                      "bytes":  33703
                   },
                   {
                       "path":  "src/native/tests/rtc_connection_diagnostics.h",
@@ -250,8 +250,8 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/src/bridge.cpp",
-                      "sha256":  "af42ee6653cac1f114287a223bbb4f914b2ea85797abf56e39259d364baea864",
-                      "bytes":  56658
+                      "sha256":  "614d65dec8d284f5ddb15567298a41ce1ed196675f126ac4771d3153ed71db59",
+                      "bytes":  56891
                   },
                   {
                       "path":  "src/rtcbridge-native/pins.json",
@@ -275,8 +275,8 @@
                   },
                   {
                       "path":  "src/rtcbridge-native/src/core.h",
-                      "sha256":  "e8f54f3c283355549dab8609bf533dba12c6274f217b1b3be9619a23205eb294",
-                      "bytes":  10637
+                      "sha256":  "c821fb0ddace91a7105fbe795e20ef3cc8345bb628d74278976233fe08ed92a6",
+                      "bytes":  10652
                   },
                   {
                       "path":  "src/rtcbridge-native/src/histogram.h",

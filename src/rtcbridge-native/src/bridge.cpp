@@ -244,6 +244,7 @@ public:
       if (!direct_proof_) direct_proof_.emplace(GetTickCount64());
       SelectedPairIdentity identity{"pair-a", "local-a", "remote-a", "host", "host"};
       if (kind == 22) identity.pair = "pair-b";
+      if (kind == 25) { identity.remote = "reflexive-before-signaling"; identity.remote_type = "prflx"; }
       const auto evidence = kind == 23 ? DirectPairEvidence::Missing :
           selected_pair_.Observe(identity, kind == 21 ? "in-progress" : kind == 24 ? "failed" : "succeeded").evidence;
       ApplyDirectEvidence(evidence, GetTickCount64());
@@ -850,10 +851,11 @@ public:
               direct_evidence = observed.evidence;
 #ifdef GB_RTC_BENCH
               retained_routine_probe=observed.retained_routine_probe;
-              evidence_reason=direct_evidence==DirectPairEvidence::Mismatched?
+              evidence_reason=direct_evidence==DirectPairEvidence::Mismatched && !observed.changed_proven_identity?
                 ProofEvidence::PairNotSucceeded:ProofEvidence::Other;
 #endif
               if (direct_evidence == DirectPairEvidence::Direct ||
+                  direct_evidence == DirectPairEvidence::Stabilizing ||
                   direct_evidence == DirectPairEvidence::Relay)
                 break;
               continue;
@@ -864,8 +866,6 @@ public:
                         relay ? "{\"route\":2}" : "{\"route\":1}");
           }
           if (self->network_.direct_only && self->direct_proof_) {
-            if (direct_evidence != DirectPairEvidence::Direct)
-              self->selected_pair_.Invalidate();
 #ifdef GB_RTC_BENCH
             if (direct_evidence != DirectPairEvidence::Direct)
               self->direct_diagnostics->SampleUnproven();
@@ -904,6 +904,8 @@ public:
 private:
   void ApplyDirectEvidence(DirectPairEvidence evidence, uint64_t now) {
     if (closed || failed || !direct_proof_) return;
+    if (evidence != DirectPairEvidence::Direct && evidence != DirectPairEvidence::Stabilizing)
+      selected_pair_.Invalidate();
     switch (direct_proof_->Observe(evidence, now)) {
     case DirectProofResult::Proven:
       if (MarkDirectRouteProven()) {
@@ -1475,7 +1477,7 @@ GB_RTC_API gb_rtc_result GB_RTC_CALL gb_rtc_test_probe(gb_rtc_handle handle,
       return GB_RTC_STATE;
     if (kind == 99)
       throw std::runtime_error("probe");
-    if (kind >= 20 && kind <= 24)
+    if (kind >= 20 && kind <= 25)
       return s->ProbeDirectRoute(kind);
     auto frame = kind == 1   ? s->video.Pop()
                  : kind == 2 ? s->audio.Pop()

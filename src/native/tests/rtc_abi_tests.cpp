@@ -259,7 +259,6 @@ int main(int argc, char** argv) {
       PeerEvents events; gb_rtc_handle route{};
       CHECK(api.create_v2(&config,&network,peer_callback,&events,&route)==GB_RTC_OK);
       struct Guard {Api& api;gb_rtc_handle handle;~Guard(){api.close(handle);}} guard{api,route};
-      CHECK(api.probe(route,20)==GB_RTC_OK);
       unsigned directs=0, errors=0;
       const auto collect=[&] {
         std::lock_guard lock(events.mutex);
@@ -270,6 +269,13 @@ int main(int argc, char** argv) {
         }
         events.pending.clear();
       };
+      CHECK(api.probe(route,25)==GB_RTC_OK);
+      CHECK(api.probe(route,20)==GB_RTC_OK);
+      Sleep(25);collect();CHECK(directs==0&&errors==0);
+      CHECK(api.probe(route,21)==GB_RTC_OK);
+      CHECK(api.probe(route,20)==GB_RTC_OK);
+      Sleep(25);collect();CHECK(directs==0&&errors==0);
+      CHECK(api.probe(route,20)==GB_RTC_OK);
       auto deadline=GetTickCount64()+2000;
       do {collect();if(!directs)Sleep(1);} while(!directs&&GetTickCount64()<deadline);
       CHECK(directs==1);

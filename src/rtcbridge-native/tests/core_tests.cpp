@@ -61,8 +61,34 @@ int main() {
   return 1;
 #else
   const SelectedPairIdentity original{"pair-a", "local-a", "remote-a", "host", "srflx"};
+  {
+    SelectedPairTracker settling;
+    DirectRouteProof startup(1000);
+    auto reflexive = original;
+    reflexive.remote = "reflexive-before-signaling";
+    reflexive.remote_type = "prflx";
+    assert(startup.Observe(settling.Observe(reflexive, "succeeded").evidence, 1001) == DirectProofResult::Pending);
+    assert(startup.Observe(settling.Observe(original, "succeeded").evidence, 1002) == DirectProofResult::Pending);
+    settling.Invalidate();
+    assert(startup.Observe(DirectPairEvidence::Missing, 1003) == DirectProofResult::Pending);
+    assert(startup.Observe(settling.Observe(original, "succeeded").evidence, 1004) == DirectProofResult::Pending);
+    assert(startup.Observe(settling.Observe(original, "in-progress").evidence, 1005) == DirectProofResult::Pending);
+    assert(startup.Observe(settling.Observe(original, "succeeded").evidence, 1006) == DirectProofResult::Pending);
+    assert(startup.Observe(settling.Observe(original, "succeeded").evidence, 1007) == DirectProofResult::Proven);
+    assert(startup.Observe(settling.Observe(original, "in-progress").evidence, 1008) == DirectProofResult::Stable);
+    assert(startup.Observe(settling.Observe(reflexive, "succeeded").evidence, 1009) == DirectProofResult::Regressed);
+    assert(startup.Observe(settling.Observe(original, "succeeded").evidence, 1010) == DirectProofResult::Regressed);
+    assert(startup.DeadlineMs() == 6000);
+  }
+  {
+    SelectedPairTracker settling;
+    DirectRouteProof startup(1000);
+    assert(startup.Observe(settling.Observe(original, "succeeded").evidence, 5999) == DirectProofResult::Pending);
+    assert(startup.Observe(settling.Observe(original, "succeeded").evidence, 6000) == DirectProofResult::Expired);
+  }
   SelectedPairTracker tracker;
   assert(tracker.Observe(original, "in-progress").evidence == DirectPairEvidence::Mismatched);
+  assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Stabilizing);
   assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Direct);
   const auto retained = tracker.Observe(original, "in-progress");
   assert(retained.evidence == DirectPairEvidence::Direct && retained.retained_routine_probe);
@@ -89,15 +115,18 @@ int main() {
     case 4: changed.remote_type = "host"; break;
     }
     tracker.Invalidate();
+    assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Stabilizing);
     assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Direct);
     assert(tracker.Observe(changed, "in-progress").evidence == DirectPairEvidence::Mismatched);
     // Regression cannot be undone by old identity plus a routine probe.
     assert(tracker.Observe(original, "in-progress").evidence == DirectPairEvidence::Mismatched);
+    assert(tracker.Observe(changed, "succeeded").evidence == DirectPairEvidence::Stabilizing);
     assert(tracker.Observe(changed, "succeeded").evidence == DirectPairEvidence::Direct);
     assert(tracker.Observe(changed, "in-progress").retained_routine_probe);
   }
   for (auto state : {"failed", "waiting", "frozen", "", "unknown"}) {
     tracker.Invalidate();
+    assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Stabilizing);
     assert(tracker.Observe(original, "succeeded").evidence == DirectPairEvidence::Direct);
     assert(tracker.Observe(original, state).evidence == DirectPairEvidence::Mismatched);
     assert(!tracker.Observe(original, "in-progress").retained_routine_probe);
@@ -112,10 +141,12 @@ int main() {
     case 4: missing.remote_type.clear(); break;
     }
     tracker.Observe(original, "succeeded");
+    tracker.Observe(original, "succeeded");
     assert(tracker.Observe(missing, "in-progress").evidence != DirectPairEvidence::Direct);
     assert(tracker.Observe(original, "in-progress").evidence == DirectPairEvidence::Mismatched);
     assert(tracker.Observe(missing, "succeeded").evidence != DirectPairEvidence::Direct);
   }
+  tracker.Observe(original, "succeeded");
   tracker.Observe(original, "succeeded");
   tracker.Invalidate(); // no selected pair or candidate record in a later report
   assert(tracker.Observe(original, "in-progress").evidence == DirectPairEvidence::Mismatched);
@@ -125,6 +156,7 @@ int main() {
   SelectedPairIdentity changed_direct=original;
   changed_direct.pair="pair-b";
   DirectRouteProof changed_proof(1000);
+  assert(changed_proof.Observe(tracker.Observe(original,"succeeded").evidence,1999)==DirectProofResult::Pending);
   assert(changed_proof.Observe(tracker.Observe(original,"succeeded").evidence,2000)==DirectProofResult::Proven);
   assert(changed_proof.Observe(tracker.Observe(changed_direct,"in-progress").evidence,3000)==DirectProofResult::Regressed);
   assert(changed_proof.Observe(tracker.Observe(changed_direct,"succeeded").evidence,3001)==DirectProofResult::Regressed);
@@ -139,8 +171,11 @@ int main() {
     }
     SelectedPairTracker pinned;
     DirectRouteProof terminal(1000);
+    assert(terminal.Observe(pinned.Observe(original, "succeeded").evidence, 1999) == DirectProofResult::Pending);
     assert(terminal.Observe(pinned.Observe(original, "succeeded").evidence, 2000) == DirectProofResult::Proven);
-    assert(terminal.Observe(pinned.Observe(changed, "succeeded").evidence, 2001) == DirectProofResult::Regressed);
+    const auto identity_loss = pinned.Observe(changed, "succeeded");
+    assert(identity_loss.changed_proven_identity);
+    assert(terminal.Observe(identity_loss.evidence, 2001) == DirectProofResult::Regressed);
     assert(terminal.Observe(pinned.Observe(changed, "succeeded").evidence, 2002) == DirectProofResult::Regressed);
   }
   for (auto state : {"succeeded", "in-progress", "failed"}) {
@@ -148,6 +183,7 @@ int main() {
     auto relay = original;
     relay.remote_type = "relay";
     DirectRouteProof relay_proof(1000);
+    assert(relay_proof.Observe(tracker.Observe(original, "succeeded").evidence, 1999) == DirectProofResult::Pending);
     assert(relay_proof.Observe(tracker.Observe(original, "succeeded").evidence, 2000) == DirectProofResult::Proven);
     assert(relay_proof.Observe(tracker.Observe(relay, state).evidence, 2001) == DirectProofResult::Forbidden);
   }
@@ -157,6 +193,7 @@ int main() {
   DirectRouteGate closed_pair_gate;
   assert(closed_pair_gate.Prove());
   closed_pair_gate.Close();
+  tracker.Observe(original, "succeeded");
   tracker.Observe(original, "succeeded");
   assert(tracker.Observe(original, "in-progress").retained_routine_probe);
   assert(!closed_pair_gate.Prove() && !closed_pair_gate.Admit([] {}));

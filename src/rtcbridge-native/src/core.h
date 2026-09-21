@@ -229,6 +229,7 @@ enum class DirectPairEvidence {
   Mismatched,
   Direct,
   Relay,
+  Stabilizing,
 };
 
 inline bool DirectTrafficAllowed(bool direct_only, bool direct_proven) {
